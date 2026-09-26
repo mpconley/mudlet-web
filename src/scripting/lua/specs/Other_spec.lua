@@ -168,6 +168,59 @@ describe("Tests Other.lua functions", function()
       end)
     end)
 
+    describe("the state a new group is created in", function()
+      -- What a group arrives as is not visible through a spy, so these need real
+      -- items, and what they pin is the state *creation* leaves a group in. Lua
+      -- cannot delete a permanent item, so take the first name no earlier run
+      -- has used rather than reusing what one left behind: a group this build
+      -- never made would be reporting the state some earlier build created it
+      -- in, and an already-correct leftover would cover for creation code that
+      -- had since broken. permGroup spells the key type "key" where exists()
+      -- and isActive() spell it "keybind".
+      --
+      -- The search runs as far as it needs to: giving up would mean asserting
+      -- over an old item or skipping the check, both of which leave this green
+      -- while testing nothing. The bound only stops a broken exists() spinning
+      -- forever, and reaching it raises rather than skips.
+      local searchLimit = 100000
+
+      local function group(groupType, itemType)
+        local stem = "permGroupSpecState" .. groupType
+        for index = 1, searchLimit do
+          local name = ("%s%d"):format(stem, index)
+          if exists(name, itemType) == 0 then
+            assert.is_true(permGroup(name, groupType), "could not create the " .. groupType .. " group")
+            return name
+          end
+        end
+        error(("no free \"%s\" name in this profile after %d tries"):format(stem, searchLimit))
+      end
+
+      it("creates trigger groups enabled", function()
+        assert.are.equal(1, isActive(group("trigger", "trigger"), "trigger"))
+      end)
+
+      it("creates alias groups enabled", function()
+        assert.are.equal(1, isActive(group("alias", "alias"), "alias"))
+      end)
+
+      it("creates key groups enabled", function()
+        assert.are.equal(1, isActive(group("key", "keybind"), "keybind"))
+      end)
+
+      -- permTimer() and permScript() create every item disabled, group or not,
+      -- and permGroup() is documented as passing that on rather than papering
+      -- over it: a timer group that started itself would fire whatever is put
+      -- in it before the script that fills it has finished
+      it("creates timer groups disabled", function()
+        assert.are.equal(0, isActive(group("timer", "timer"), "timer"))
+      end)
+
+      it("creates script groups disabled", function()
+        assert.are.equal(0, isActive(group("script", "script"), "script"))
+      end)
+    end)
+
     describe("reports failure instead of raising when creation fails", function()
       -- #9545: group_creation_functions checked `perm*(...) == -1`, but the perm*
       -- bindings raise a Lua error on failure (for example a missing parent)
@@ -412,6 +465,83 @@ describe("Tests Other.lua functions", function()
     end)
   end)
 
+  describe("Tests the interface language Mudlet publishes", function()
+
+    -- mudlet.translations.interfacelanguage is what translateTable() and
+    -- loadTranslations() fall back to, and cTelnet sends it to the game server as
+    -- the NEW-ENVIRON LANG variable. Nothing else asserts it is set at all, so a
+    -- startup that stopped filling it would leave every caller with an empty
+    -- string and no test would notice.
+    it("names a language, and one the directions table was built under", function()
+      assert.is_table(mudlet.translations)
+      assert.is_string(mudlet.translations.interfacelanguage)
+      assert.is_truthy(#mudlet.translations.interfacelanguage > 0)
+      assert.is_table(mudlet.translations[mudlet.translations.interfacelanguage])
+    end)
+
+    it("is the language translateTable falls back to when none is given", function()
+      local directions = mudlet.translations[mudlet.translations.interfacelanguage]
+      local translated = translateTable({"north"})
+      assert.are.equal(directions["north"], translated[1])
+    end)
+  end)
+
+  describe("Tests the functionality of getMudletVersion", function()
+
+    it("answers each documented style with the piece of the version it names", function()
+      local version = getMudletVersion()
+      assert.are.equal(version.major, getMudletVersion("major"))
+      assert.are.equal(version.minor, getMudletVersion("minor"))
+      assert.are.equal(version.revision, getMudletVersion("revision"))
+      -- a development build appends its own suffix, so the version is what the
+      -- string starts with rather than all of it
+      local numbers = ("%d.%d.%d"):format(version.major, version.minor, version.revision)
+      assert.are.equal(numbers, getMudletVersion("string"):sub(1, #numbers))
+    end)
+
+    -- the four-value form is what a script unpacks in one go, so the count and
+    -- the order of the returns are as much a contract as the numbers
+    it("returns the four parts in order when asked for a table", function()
+      local version = getMudletVersion()
+      -- a release build reports no suffix as a nil fourth value rather than by
+      -- returning three, so the count is checked before the values are unpacked
+      assert.are.equal(4, select("#", getMudletVersion("table")))
+      local major, minor, revision, build = getMudletVersion("table")
+      assert.are.equal(version.major, major)
+      assert.are.equal(version.minor, minor)
+      assert.are.equal(version.revision, revision)
+      -- a release build has no suffix, and nil is how that is reported
+      if build ~= nil then
+        assert.are.equal(build, getMudletVersion("build"))
+      end
+    end)
+
+    it("reads the style however it is cased and spaced", function()
+      assert.are.equal(getMudletVersion("major"), getMudletVersion("  MAJOR  "))
+    end)
+
+    -- the two refusals are worded differently on purpose: one is "that is not a
+    -- style", the other is "you passed too many arguments", and collapsing them
+    -- would leave the second mistake looking like the first
+    it("lists the styles it has when refusing one it does not", function()
+      local ok, err = pcall(getMudletVersion, "patch")
+      assert.is_false(ok)
+      for _, style in ipairs({"major", "minor", "revision", "build", "string", "table"}) do
+        assert.is_true(err:find(style, 1, true) ~= nil, style .. " was left out of: " .. tostring(err))
+      end
+      assert.is_true(err:find("takes one (optional) argument", 1, true) ~= nil, tostring(err))
+      -- "only takes one" contains "takes one", so the wording of the other
+      -- refusal has to be ruled out for this to mean anything
+      assert.is_nil(err:find("only takes one", 1, true), "an unknown style was reported as too many arguments: " .. tostring(err))
+    end)
+
+    it("says so separately when given more than the one argument it takes", function()
+      local ok, err = pcall(getMudletVersion, "major", "minor")
+      assert.is_false(ok)
+      assert.is_true(err:find("only takes one (optional) argument", 1, true) ~= nil, tostring(err))
+    end)
+  end)
+
   describe("Tests the functionality of mudletOlderThan", function()
     it("tests the comparisons", function()
       local versionTable = getMudletVersion()
@@ -590,6 +720,18 @@ describe("Tests Other.lua functions", function()
         string.format("expected roughly %s but got %s", tostring(expected), tostring(actual)))
     end
 
+    -- Returns once at least `milliseconds` of real time have gone by, by
+    -- waiting on an event a real timer raises. Only the one spec which needs a
+    -- running stopwatch's reported time to move on its own uses this;
+    -- everything else here is deterministic without waiting.
+    local pumpCounter = 0
+    local function pump(milliseconds)
+      pumpCounter = pumpCounter + 1
+      local eventName = "stopwatchSpecPump" .. pumpCounter
+      tempTimer(milliseconds / 1000, function() raiseEvent(eventName) end)
+      waitForEvent(eventName, milliseconds + 1000)
+    end
+
     teardown(function()
       for _, id in ipairs(createdIds) do
         pcall(deleteStopWatch, id)
@@ -638,6 +780,65 @@ describe("Tests Other.lua functions", function()
         assert.equals(12.5, getStopWatchTime(id))
         assert.is_true(adjustStopWatch(id, -2.5))
         assert.equals(10.0, getStopWatchTime(id))
+      end)
+
+      it("adjustStopWatch keeps adjustments whose milliseconds exceed a 32-bit integer", function()
+        -- 2147483.648 s is where the milliseconds stop fitting into an int,
+        -- which is what the adjustment used to be converted through
+        local id = track(createStopWatch(false))
+        assert.is_true(adjustStopWatch(id, 2147484))
+        assert.equals(2147484, getStopWatchTime(id))
+        assert.is_true(resetStopWatch(id))
+        assert.is_true(adjustStopWatch(id, -2147484))
+        assert.equals(-2147484, getStopWatchTime(id))
+      end)
+
+      it("adjustStopWatch shifts a running stopwatch by a large amount as well", function()
+        local id = track(createStopWatch(true))
+        assert.is_true(adjustStopWatch(id, 1e11))
+        assertClose(1e11, getStopWatchTime(id), 1)
+      end)
+
+      it("adjustStopWatch clamps a stopped stopwatch to the time it can hold", function()
+        -- 1e12 s is the declared limit, and accumulating past it stops there
+        -- rather than wrapping around onto a time of the opposite sign
+        local id = track(createStopWatch(false))
+        assert.is_true(adjustStopWatch(id, 1e12))
+        assert.equals(1e12, getStopWatchTime(id))
+        assert.is_true(adjustStopWatch(id, 1e12))
+        assert.equals(1e12, getStopWatchTime(id))
+        assert.is_true(resetStopWatch(id))
+        assert.is_true(adjustStopWatch(id, -1e12))
+        assert.is_true(adjustStopWatch(id, -1e12))
+        assert.equals(-1e12, getStopWatchTime(id))
+      end)
+
+      it("adjustStopWatch clamps a running stopwatch to the time it can hold", function()
+        -- a running stopwatch measures from an effective start time, so this
+        -- takes the other branch: both the shift itself and the time passing
+        -- afterwards have to stop at the limit
+        local id = track(createStopWatch(true))
+        assert.is_true(adjustStopWatch(id, 1e12))
+        -- the time that goes by here would carry a stopwatch sitting on the
+        -- limit past it, so this is the clamp on what a running stopwatch
+        -- reports and not just the one on the adjustment
+        pump(50)
+        assert.equals(1e12, getStopWatchTime(id))
+        assert.is_true(adjustStopWatch(id, 1e12))
+        assert.equals(1e12, getStopWatchTime(id))
+      end)
+
+      it("adjustStopWatch refuses an adjustment beyond the whole range", function()
+        local id = track(createStopWatch(false))
+        assert.is_true(adjustStopWatch(id, 5))
+        for _, value in ipairs({0/0, math.huge, -math.huge, 1e300, 1e12 + 1, -1e12 - 1}) do
+          local ok, err = adjustStopWatch(id, value)
+          assert.is_nil(ok)
+          assert.is_truthy(err:find("must be a finite number from", 1, true),
+            string.format("unexpected message for %s: %s", tostring(value), tostring(err)))
+          -- and the stopwatch is left as it was
+          assert.equals(5, getStopWatchTime(id))
+        end
       end)
 
       it("getStopWatchTime resolves a stopwatch by its name", function()
@@ -734,6 +935,12 @@ describe("Tests Other.lua functions", function()
         assert.is_boolean(t.negative)
       end)
 
+      it("returns nil and a message for an unknown id", function()
+        local ok, err = getStopWatchBrokenDownTime(444444)
+        assert.is_nil(ok)
+        assert.is_string(err)
+      end)
+
       it("flags negative elapsed time with the negative field", function()
         local id = track(createStopWatch(false))
         adjustStopWatch(id, -90) -- one minute thirty seconds in the past
@@ -759,6 +966,101 @@ describe("Tests Other.lua functions", function()
         local ok, err = deleteStopWatch(555555)
         assert.is_nil(ok)
         assert.is_string(err)
+      end)
+    end)
+
+    -- Every one of these takes a name where the tests above pass an id, which
+    -- is a separate lookup in Host: an id goes straight to the stopwatch, while
+    -- a name has to be resolved to one first.
+    describe("naming a stopwatch instead of giving its id", function()
+      it("startStopWatch and stopStopWatch both take a name", function()
+        local id = track(createStopWatch("stopwatchSpecByNameRun"))
+        assert.is_true(startStopWatch("stopwatchSpecByNameRun"))
+        assert.is_true(getStopWatches()[id].isRunning)
+        adjustStopWatch(id, 6)
+
+        assertClose(6, stopStopWatch("stopwatchSpecByNameRun"))
+        assert.is_false(getStopWatches()[id].isRunning)
+      end)
+
+      it("setStopWatchName renames the stopwatch that currently has that name", function()
+        local id = track(createStopWatch("stopwatchSpecOldName"))
+
+        assert.is_true(setStopWatchName("stopwatchSpecOldName", "stopwatchSpecNewName"))
+
+        assert.equals("stopwatchSpecNewName", getStopWatches()[id].name)
+        local ok, err = getStopWatchTime("stopwatchSpecOldName")
+        assert.is_nil(ok, "the stopwatch still answers to the name it was renamed away from")
+        assert.is_string(err)
+      end)
+
+      it("getStopWatchBrokenDownTime takes a name", function()
+        local id = track(createStopWatch("stopwatchSpecBrokenDownByName"))
+        adjustStopWatch(id, 2 * 60 + 5)
+
+        local elapsed = getStopWatchBrokenDownTime("stopwatchSpecBrokenDownByName")
+
+        assert.equals(2, elapsed.minutes)
+        assert.equals(5, elapsed.seconds)
+      end)
+
+      it("says which name it could not find", function()
+        local ok, err = startStopWatch("stopwatchSpecNoSuchWatch")
+        assert.is_nil(ok)
+        assert.is_truthy(err:find("stopwatchSpecNoSuchWatch", 1, true), err)
+
+        ok, err = stopStopWatch("stopwatchSpecNoSuchWatch")
+        assert.is_nil(ok)
+        assert.is_truthy(err:find("stopwatchSpecNoSuchWatch", 1, true), err)
+
+        ok, err = setStopWatchName("stopwatchSpecNoSuchWatch", "stopwatchSpecIrrelevant")
+        assert.is_nil(ok)
+        assert.is_truthy(err:find("stopwatchSpecNoSuchWatch", 1, true), err)
+      end)
+    end)
+
+    describe("starting a stopwatch that is already running", function()
+      -- startStopWatch(id) resets the stopwatch back to zero first, which is
+      -- what it has always done; passing false asks for the elapsed time so far
+      -- to be kept, and then starting one that is already running is refused
+      it("keeps the elapsed time when asked not to reset", function()
+        local id = track(createStopWatch(false))
+        adjustStopWatch(id, 20)
+
+        assert.is_true(startStopWatch(id, false))
+
+        assertClose(20, getStopWatchTime(id))
+        stopStopWatch(id)
+      end)
+
+      it("throws the elapsed time away when not asked to keep it", function()
+        local id = track(createStopWatch(false))
+        adjustStopWatch(id, 20)
+
+        assert.is_true(startStopWatch(id))
+
+        assertClose(0, getStopWatchTime(id))
+        stopStopWatch(id)
+      end)
+
+      it("refuses a second start that would keep the elapsed time", function()
+        local id = track(createStopWatch(false))
+        assert.is_true(startStopWatch(id, false))
+        finally(function() stopStopWatch(id) end)
+
+        local ok, err = startStopWatch(id, false)
+
+        assert.is_nil(ok)
+        assert.is_truthy(err:find("already running", 1, true), err)
+      end)
+
+      it("refuses to stop one that is already stopped", function()
+        local id = track(createStopWatch("stopwatchSpecAlreadyStopped"))
+
+        local ok, err = stopStopWatch("stopwatchSpecAlreadyStopped")
+
+        assert.is_nil(ok)
+        assert.is_truthy(err:find("already stopped", 1, true), err)
       end)
     end)
 
@@ -861,12 +1163,126 @@ describe("Tests Other.lua functions", function()
       originalValues.showSentText = nil
     end)
 
+    it("round-trips the 2D map room symbol font", function()
+      -- Unlike the other map keys these do not need an open mapper, because the
+      -- settings live on the map object rather than the mapper widget.
+      local original = getConfig("mapSymbolFont")
+      assert.is_string(original)
+      snapshot("mapSymbolFont")
+
+      -- pick an installed font that is not the one in use, so the assertion
+      -- cannot pass by doing nothing. pairs() has no defined order, so sort.
+      local names = {}
+      for name in pairs(getAvailableFonts()) do
+        names[#names + 1] = name
+      end
+      table.sort(names)
+      local otherFont
+      for _, name in ipairs(names) do
+        if name ~= original then
+          otherFont = name
+          break
+        end
+      end
+      assert.is_string(otherFont)
+
+      assert.is_true(setConfig("mapSymbolFont", otherFont))
+      assert.equals(otherFont, getConfig("mapSymbolFont"))
+
+      -- matched case-insensitively, read back as the font database spells it
+      assert.is_true(setConfig("mapSymbolFont", otherFont:upper()))
+      assert.equals(otherFont, getConfig("mapSymbolFont"))
+
+      local ok, err = setConfig("mapSymbolFont", "No Such Font At All")
+      assert.is_nil(ok)
+      assert.is_string(err)
+      assert.equals(otherFont, getConfig("mapSymbolFont"))
+
+      restore("mapSymbolFont")
+    end)
+
+    it("round-trips the 2D map room symbol scaling factor", function()
+      snapshot("mapSymbolFontScaling")
+      assert.is_true(setConfig("mapSymbolFontScaling", 1.25))
+      assert.equals(1.25, getConfig("mapSymbolFontScaling"))
+      -- the ends of the range the preferences spin-box offers
+      assert.is_true(setConfig("mapSymbolFontScaling", 0.50))
+      assert.equals(0.50, getConfig("mapSymbolFontScaling"))
+      assert.is_true(setConfig("mapSymbolFontScaling", 2.00))
+      assert.equals(2.00, getConfig("mapSymbolFontScaling"))
+
+      assert.is_true(setConfig("mapSymbolFontScaling", 1.10))
+      -- NaN belongs in this list because it is the one value a plain range
+      -- check does not stop: it compares false against both bounds. The
+      -- infinities are here only to pin that they stay refused - the range
+      -- check already handles those, and 0 is the value that would really do
+      -- damage, blanking every room symbol.
+      for _, value in ipairs({0.49, 2.01, -1, 0, 0/0, 1/0, -1/0}) do
+        local ok, err = setConfig("mapSymbolFontScaling", value)
+        assert.is_nil(ok, "setConfig accepted out-of-range value: " .. tostring(value))
+        assert.is_string(err)
+        assert.is_truthy(err:find("out of range", 1, true), err)
+      end
+      assert.equals(1.10, getConfig("mapSymbolFontScaling"))
+
+      restore("mapSymbolFontScaling")
+    end)
+
+    -- The flag's whole effect on the font is the NoFontMerging style strategy
+    -- bit, which is not visible from Lua at all - getConfig("mapSymbolFont")
+    -- reports the family. So this only pins the round-trip; that setting a
+    -- font afterwards does not silently drop the bit is pinned by
+    -- test_pickingAFontKeepsTheOnlyUseSelectedStrategy in
+    -- test/functional_tests/MapSymbolFontTest.cpp.
+    it("round-trips the only-use-selected symbol font flag", function()
+      snapshot("mapSymbolFontOnlyUseSelected")
+
+      assert.is_true(setConfig("mapSymbolFontOnlyUseSelected", true))
+      assert.is_true(getConfig("mapSymbolFontOnlyUseSelected"))
+
+      assert.is_true(setConfig("mapSymbolFontOnlyUseSelected", false))
+      assert.is_false(getConfig("mapSymbolFontOnlyUseSelected"))
+
+      restore("mapSymbolFontOnlyUseSelected")
+    end)
+
+    -- The preferences have a whole dialog listing which room symbols the chosen
+    -- font can draw; a script has only what setConfig hands back. The font is
+    -- still taken, so the warning rides along with a true rather than
+    -- replacing it.
+    it("warns when the chosen symbol font cannot draw a symbol the map uses", function()
+      snapshot("mapSymbolFont")
+
+      -- U+10FFFD, the last codepoint of Private Use Plane 16. Nothing is
+      -- assigned there, so no font on any machine this runs on has a glyph for
+      -- it and the map is guaranteed to hold a symbol that cannot be drawn.
+      local unrenderable = "\244\143\191\189"
+      local roomId = createRoomID()
+      assert.is_true(addRoom(roomId))
+      assert.is_true(setRoomChar(roomId, unrenderable))
+
+      local ok, warning = setConfig("mapSymbolFont", getConfig("mapSymbolFont"))
+      assert.is_true(ok, "the font was refused outright rather than taken with a warning")
+      assert.is_string(warning, "setConfig said nothing about a symbol that will show as the replacement character")
+      assert.is_truthy(warning:find(unrenderable, 1, true), warning)
+
+      -- and it stops saying so once nothing in the map needs that glyph
+      assert.is_true(setRoomChar(roomId, "A"))
+      local okAgain, warningAgain = setConfig("mapSymbolFont", getConfig("mapSymbolFont"))
+      assert.is_true(okAgain)
+      assert.is_falsy(warningAgain and warningAgain:find(unrenderable, 1, true), tostring(warningAgain))
+
+      deleteRoom(roomId)
+      restore("mapSymbolFont")
+    end)
+
     it("round-trips the string enum options", function()
       local enums = {
         caretShortcut = {"none", "tab", "ctrltab", "f6"},
         blankLinesBehaviour = {"show", "hide", "replacewithspace"},
         controlCharacterHandling = {"asis", "oem", "picture"},
         ambiguousEAsianWidthCharacters = {"narrow", "wide", "auto"},
+        mapperButton = {"scripted", "disabled", "default"},
       }
       local exercised = 0
       for key, values in pairs(enums) do
@@ -895,6 +1311,20 @@ describe("Tests Other.lua functions", function()
       assert.is_nil(ok)
       assert.is_string(err)
       restore("caretShortcut")
+    end)
+
+    it("starts mapperButton on default each session and keeps the last good mode on a bad value", function()
+      -- mapperButton is deliberately session-only (an uninstalled UI package
+      -- must not leave the map button dead for good), so a fresh self-test
+      -- profile has to read "default"
+      snapshot("mapperButton")
+      assert.equals("default", getConfig("mapperButton"))
+      assert.is_true(setConfig("mapperButton", "scripted"))
+      local ok, err = setConfig("mapperButton", "sideways")
+      assert.is_nil(ok)
+      assert.is_string(err)
+      assert.equals("scripted", getConfig("mapperButton"))
+      restore("mapperButton")
     end)
 
     it("round-trips commandLineHistorySaveSize (numeric option)", function()
@@ -952,6 +1382,323 @@ describe("Tests Other.lua functions", function()
       assert.is_table(result)
       assert.equals(getConfig("enableGMCP"), result.enableGMCP)
       assert.equals(getConfig("editorAutoComplete"), result.editorAutoComplete)
+    end)
+
+    -- The modern key and the negotiation-off key it replaced are two spellings
+    -- of one flag, so a script written against either has to see what the other
+    -- one did. getConfig() with no arguments does not list the modern spellings,
+    -- so the generic round-trip loop above never reaches them.
+    it("keeps enableCHARSET the exact inverse of specialForceCharsetNegotiationOff", function()
+      snapshot("enableCHARSET")
+      assert.is_boolean(getConfig("enableCHARSET"))
+
+      assert.is_true(setConfig("enableCHARSET", true))
+      assert.is_true(getConfig("enableCHARSET"))
+      assert.is_false(getConfig("specialForceCharsetNegotiationOff"))
+
+      assert.is_true(setConfig("specialForceCharsetNegotiationOff", true))
+      assert.is_false(getConfig("enableCHARSET"))
+
+      restore("enableCHARSET")
+    end)
+
+    it("keeps enableNEWENVIRON the exact inverse of forceNewEnvironNegotiationOff", function()
+      snapshot("enableNEWENVIRON")
+      assert.is_boolean(getConfig("enableNEWENVIRON"))
+
+      assert.is_true(setConfig("enableNEWENVIRON", true))
+      assert.is_true(getConfig("enableNEWENVIRON"))
+      assert.is_false(getConfig("forceNewEnvironNegotiationOff"))
+
+      assert.is_true(setConfig("forceNewEnvironNegotiationOff", true))
+      assert.is_false(getConfig("enableNEWENVIRON"))
+
+      restore("enableNEWENVIRON")
+    end)
+
+    it("takes showSentText as a boolean, which is the legacy spelling of two of the modes", function()
+      local original = getConfig("showSentText", true)
+      originalValues.showSentText = original
+
+      assert.is_true(setConfig("showSentText", false))
+      assert.equals("never", getConfig("showSentText", true))
+
+      assert.is_true(setConfig("showSentText", true))
+      assert.equals("script", getConfig("showSentText", true))
+
+      setConfig("showSentText", original)
+      originalValues.showSentText = nil
+    end)
+
+    it("refuses a showSentText mode it does not have, and leaves the mode alone", function()
+      -- if a refusal turns out to have applied the value after all, the
+      -- assertion below fails with the mode already changed, so the teardown
+      -- safety net has to know the string form of what it was
+      local original = getConfig("showSentText", true)
+      originalValues.showSentText = original
+
+      local ok, err = setConfig("showSentText", "sometimes")
+      assert.is_nil(ok)
+      assert.is_string(err)
+      assert.equals(original, getConfig("showSentText", true), "a rejected mode was applied anyway")
+
+      -- neither a boolean nor a string is not a mode at all
+      local okType, errType = setConfig("showSentText", 42)
+      assert.is_nil(okType)
+      assert.is_string(errType)
+      assert.equals(original, getConfig("showSentText", true))
+      originalValues.showSentText = nil
+    end)
+
+    -- Each of these keys refuses a value outside its own set. The refusal has to
+    -- carry the set, because that list is the only place a script author can
+    -- read what the key accepts.
+    it("lists what it accepts when refusing a string enum, and changes nothing", function()
+      local enums = {
+        blankLinesBehaviour = {"replacewithspace", "sideways"},
+        controlCharacterHandling = {"picture", "sideways"},
+        ambiguousEAsianWidthCharacters = {"narrow", "sideways"},
+      }
+      for key, pair in pairs(enums) do
+        local expectedInMessage, rejected = pair[1], pair[2]
+        snapshot(key)
+        local before = getConfig(key)
+        local ok, err = setConfig(key, rejected)
+        assert.is_nil(ok, key .. " accepted '" .. rejected .. "'")
+        assert.is_string(err)
+        assert.is_truthy(err:find(expectedInMessage, 1, true),
+          key .. " did not say it accepts '" .. expectedInMessage .. "', got: " .. tostring(err))
+        assert.equals(before, getConfig(key), key .. " was changed by a rejected value")
+        restore(key)
+      end
+    end)
+
+    -- the refusals for blankLinesBehaviour and controlCharacterHandling name
+    -- caretShortcut and commandLineHistorySaveSize instead of the key that was
+    -- actually rejected (#10391)
+    pending("names the key it rejected in every string enum refusal")
+
+    -- A setting that changed raises sysSettingChanged with its getConfig key
+    -- and the new value. Writing the value a setting already holds raises
+    -- nothing, which is what keeps a handler that echoes the value back
+    -- through setConfig from looping.
+    describe("sysSettingChanged", function()
+      -- Each entry keeps what the handler was handed plus what getConfig()
+      -- returned from inside the handler: the second one is what says the
+      -- setting was already updated when the event went out. The handler is
+      -- killed by the caller's own finally(), because busted keeps only one of
+      -- those per test and the restore has to share it.
+      local function record()
+        local events = {}
+        local id = registerAnonymousEventHandler("sysSettingChanged", function(_, key, value)
+          events[#events + 1] = {key = key, value = value, readBack = getConfig(key)}
+        end)
+        return events, function() killAnonymousEventHandler(id) end
+      end
+
+      local function assertOneEvent(events, key, value)
+        assert.equals(1, #events, "expected one sysSettingChanged for " .. key .. ", got " .. #events)
+        assert.equals(key, events[1].key)
+        assert.equals(value, events[1].value, "the event carried " .. tostring(events[1].value) .. " for " .. key)
+        assert.equals(value, events[1].readBack, "getConfig(\"" .. key .. "\") inside the handler did not read the new value")
+      end
+
+      local booleanKeys = {
+        "muteMediaAPI",
+        "muteMediaGame",
+        "compactInputLine",
+        "mapperPanelVisible",
+        "enableClosedCaption",
+        "advertiseScreenReader",
+        "announceIncomingText",
+      }
+
+      for _, key in ipairs(booleanKeys) do
+        it("raises once when " .. key .. " changes, and not when it is set to what it holds", function()
+          snapshot(key)
+          local events, kill = record()
+          finally(function()
+            kill()
+            restore(key)
+          end)
+
+          local target = not getConfig(key)
+
+          assert.is_true(setConfig(key, target))
+          assertOneEvent(events, key, target)
+
+          assert.is_true(setConfig(key, target))
+          assert.equals(1, #events, key .. " raised again for a value that did not change")
+        end)
+      end
+
+      -- A handler is allowed to write the value back. The second write is a
+      -- real change, so it raises in turn, and stops there because the third
+      -- write would not change anything.
+      it("lets a handler write the opposite value back without looping", function()
+        snapshot("muteMediaAPI")
+        setConfig("muteMediaAPI", false)
+
+        local events = {}
+        local vetoed = false
+        local id = registerAnonymousEventHandler("sysSettingChanged", function(_, key, value)
+          if key ~= "muteMediaAPI" then
+            return
+          end
+          events[#events + 1] = value
+          if value == true and not vetoed then
+            vetoed = true
+            setConfig("muteMediaAPI", false)
+          end
+        end)
+        finally(function()
+          killAnonymousEventHandler(id)
+          restore("muteMediaAPI")
+        end)
+
+        assert.is_true(setConfig("muteMediaAPI", true))
+
+        assert.is_false(getConfig("muteMediaAPI"), "the value the handler wrote back is not the one that stuck")
+        assert.equals(2, #events, "expected the change and the handler's write-back, got " .. #events)
+        assert.equals(true, events[1])
+        assert.equals(false, events[2])
+      end)
+    end)
+
+    describe("experiment keys", function()
+      -- The two rendering experiments are a group, of which at most one may be
+      -- on. An experiment is written to the profile, so whichever one the group
+      -- arrived with is put back rather than the group being left switched off.
+      local group = "experiment.rendering"
+      local first = group .. ".originalish"
+      local second = group .. ".more-transparent"
+
+      local function allOff()
+        setConfig(first, false)
+        setConfig(second, false)
+      end
+
+      local function restoreGroup()
+        local wasActive = getConfig(group .. ".active")
+        return function()
+          allOff()
+          if wasActive then
+            setConfig(group .. "." .. wasActive, true)
+          end
+        end
+      end
+
+      it("lists the experiments this build knows", function()
+        local list = getConfig("experiment.list")
+        assert.is_table(list)
+        assert.is_true(#list > 0, "no experiments were listed")
+        local names = {}
+        for _, name in ipairs(list) do names[name] = true end
+        assert.is_true(names[first], first .. " was not listed")
+        assert.is_true(names[second], second .. " was not listed")
+      end)
+
+      it("reports an unknown experiment as off rather than refusing to read it", function()
+        assert.is_false(getConfig("experiment.no.such.thing"))
+      end)
+
+      it("refuses to enable an experiment that is not on the list", function()
+        local ok, err = setConfig("experiment.no.such.thing", true)
+        assert.is_nil(ok)
+        assert.is_true(err:find("experiment.no.such.thing", 1, true) ~= nil, tostring(err))
+        assert.is_false(getConfig("experiment.no.such.thing"))
+      end)
+
+      it("lets at most one experiment in a group be active at a time", function()
+        finally(restoreGroup())
+        allOff()
+        assert.is_nil(getConfig(group .. ".active"), "the group started with something active")
+
+        assert.is_true(setConfig(first, true))
+        assert.is_true(getConfig(first))
+        assert.equals("originalish", getConfig(group .. ".active"))
+
+        -- turning the sibling on has to turn this one off, or two mutually
+        -- exclusive renderers are both live
+        assert.is_true(setConfig(second, true))
+        assert.is_false(getConfig(first), "the group let two experiments run at once")
+        assert.equals("more-transparent", getConfig(group .. ".active"))
+
+        assert.is_true(setConfig(second, false))
+        assert.is_nil(getConfig(group .. ".active"))
+      end)
+    end)
+
+    describe("IRC keys", function()
+      -- These are stored in the profile rather than on the Host, and are the
+      -- only config keys that read back through dlgIRC.
+      local ircKeys = {"ircHostName", "ircHostPort", "ircHostSecure", "ircChannels", "ircNickName"}
+
+      local function snapshotIrc()
+        local saved = {}
+        for _, key in ipairs(ircKeys) do
+          saved[key] = getConfig(key)
+        end
+        return function()
+          for _, key in ipairs(ircKeys) do
+            setConfig(key, saved[key])
+          end
+        end
+      end
+
+      it("answers every IRC key with the documented type", function()
+        assert.is_string(getConfig("ircHostName"))
+        assert.is_number(getConfig("ircHostPort"))
+        assert.is_boolean(getConfig("ircHostSecure"))
+        assert.is_string(getConfig("ircChannels"))
+        assert.is_string(getConfig("ircNickName"))
+      end)
+
+      it("round-trips the IRC connection settings", function()
+        finally(snapshotIrc())
+
+        assert.is_true(setConfig("ircHostName", "irc.mudlet-spec.invalid"))
+        assert.equals("irc.mudlet-spec.invalid", getConfig("ircHostName"))
+
+        assert.is_true(setConfig("ircHostPort", 6697))
+        assert.equals(6697, getConfig("ircHostPort"))
+
+        assert.is_true(setConfig("ircHostSecure", true))
+        assert.is_true(getConfig("ircHostSecure"))
+        assert.is_true(setConfig("ircHostSecure", false))
+        assert.is_false(getConfig("ircHostSecure"))
+
+        assert.is_true(setConfig("ircNickName", "MudletSpecNick"))
+        assert.equals("MudletSpecNick", getConfig("ircNickName"))
+      end)
+
+      -- Channels go in as one space separated string and come back joined the
+      -- same way, so a script can hand back what it read
+      it("round-trips a space separated channel list", function()
+        finally(snapshotIrc())
+
+        assert.is_true(setConfig("ircChannels", "#mudlet #mudlet-spec"))
+        assert.equals("#mudlet #mudlet-spec", getConfig("ircChannels"))
+      end)
+
+      -- An unusable port would strand the IRC client on a connect attempt it
+      -- can never make, so the reader falls back rather than handing it out
+      it("reads back the default port when the stored one is out of range", function()
+        finally(snapshotIrc())
+
+        assert.is_true(setConfig("ircHostPort", 6697))
+        assert.equals(6697, getConfig("ircHostPort"))
+
+        -- the writer takes any integer today; whether it starts refusing this
+        -- one is not what is being pinned, only that the reader never answers
+        -- with a port nothing can connect to
+        local stored = setConfig("ircHostPort", 70000)
+        local fallback = getConfig("ircHostPort")
+        assert.is_true(fallback >= 1 and fallback <= 65535, "an unusable port was handed out: " .. tostring(fallback))
+        if stored then
+          assert.are_not.equals(6697, fallback, "the stored port was left in place rather than replaced by the default")
+        end
+      end)
     end)
   end)
 
@@ -1495,6 +2242,88 @@ describe("Tests the timer API", function()
       assert.equals(firedWhenDisabled, _G.W2aPermTimerFires,
         "a disabled permanent timer must not fire again")
     end)
+
+    it("does not run with a time of zero", function()
+      -- it would fire on every pass of the event loop and keep a CPU core busy
+      assert.is_true(permTimer(trackPerm("W2aPermTimerZero"), "", 0,
+        [[_G.W2aPermTimerFires = (_G.W2aPermTimerFires or 0) + 1]]) > 0)
+      assert.is_true(enableTimer("W2aPermTimerZero"))
+      assert.equals(0, isActive("W2aPermTimerZero", "timer"))
+      settle(0.15)
+      assert.is_nil(_G.W2aPermTimerFires, "a permanent timer with no time must not fire")
+    end)
+
+    it("still fires an offset timer with a time of zero, once per firing of its parent", function()
+      -- an earlier run's parent of the same name would adopt this child and fire along with this one
+      local parent = trackPerm("W2aOffsetParent" .. getEpoch())
+      local child = trackPerm("W2aOffsetChild" .. getEpoch())
+      -- long enough that the parent cannot fire a second time before it is disabled below
+      assert.is_true(permTimer(parent, "", 0.5, [[raiseEvent("w2aOffsetParentFired")]]) > 0)
+      assert.is_true(permTimer(child, parent, 0, [[
+        _G.W2aPermTimerFires = (_G.W2aPermTimerFires or 0) + 1
+        raiseEvent("w2aOffsetChildFired")
+      ]]) > 0)
+      assert.is_true(enableTimer(child))
+      assert.is_true(enableTimer(parent))
+      waitFor("w2aOffsetChildFired")
+      disableTimer(parent)
+      settle(0.15)
+      assert.equals(1, _G.W2aPermTimerFires)
+    end)
+
+    it("does not run with a time of zero when a package brings it in switched on", function()
+      if not os.getenv("MUDLET_TEST_MODE") then
+        pending("uninstalling the fixture needs pumpEvents(), which does nothing outside MUDLET_TEST_MODE")
+        return
+      end
+      local path = getMudletHomeDir() .. "/w2a-zero-timer.xml"
+      finally(function()
+        -- uninstallPackage() refuses while the profile save the install
+        -- started is still running
+        local removed = false
+        for _ = 1, 100 do
+          if uninstallPackage("w2a-zero-timer") == true then
+            removed = true
+            break
+          end
+          pumpEvents(50)
+        end
+        os.remove(path)
+        -- let the save the uninstall queues run now rather than during the next spec
+        pumpEvents(200)
+        assert.is_true(removed, "could not uninstall the zero timer package")
+      end)
+      local file = assert(io.open(path, "w"))
+      file:write([[<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE MudletPackage>
+<MudletPackage version="1.001">
+	<TimerPackage>
+		<Timer isActive="yes" isFolder="no" isTempTimer="no" isOffsetTimer="no">
+			<name>W2aZeroFromPackage</name>
+			<script>_G.W2aPermTimerFires = (_G.W2aPermTimerFires or 0) + 1</script>
+			<command></command>
+			<packageName></packageName>
+			<time>00:00:00.000</time>
+		</Timer>
+		<Timer isActive="yes" isFolder="no" isTempTimer="no" isOffsetTimer="no">
+			<name>W2aLiveFromPackage</name>
+			<script>-- never gets to run</script>
+			<command></command>
+			<packageName></packageName>
+			<time>00:00:30.000</time>
+		</Timer>
+	</TimerPackage>
+</MudletPackage>
+]])
+      file:close()
+      assert.is_true(installPackage(path))
+
+      -- the sibling shows that a package's timers do get switched on as they arrive
+      assert.equals(1, isActive("W2aLiveFromPackage", "timer"))
+      assert.equals(0, isActive("W2aZeroFromPackage", "timer"))
+      settle(0.15)
+      assert.is_nil(_G.W2aPermTimerFires, "a permanent timer with no time must not fire")
+    end)
   end)
 
   describe("Tests exists and isActive for timers", function()
@@ -1807,12 +2636,23 @@ describe("Tests the script API", function()
         "appendScript: bad argument #2 type (lua code as string expected, got number!)")
     end)
 
+    it("errors when the position is not a number", function()
+      assert.has_error(function() appendScript("W2aScriptAppended", [[]], {}) end,
+        "appendScript: bad argument #3 type (script position as number expected, got table!)")
+    end)
+
     it("errors instead of creating anything when the script does not exist", function()
-      -- appendScript does not check getScript's -1 sentinel, so what actually
-      -- reports the missing script is the setScript underneath it; either way
-      -- nothing may be created
-      assert.has_error(function() appendScript("w2aNoSuchScriptName", [[local w2aNew = 1]]) end)
+      assert.has_error(function() appendScript("w2aNoSuchScriptName", [[local w2aNew = 1]]) end,
+        [[appendScript: cannot append to script (script "w2aNoSuchScriptName" at position 1 not found)]])
       assert.equals(0, exists("w2aNoSuchScriptName", "script"))
+    end)
+
+    it("names the position it was given when no script is there", function()
+      local _, position = makeScript("W2aScriptAppendPosition", "", [[local w2aOriginal = 1]])
+      local beyondTheLast = position + 1
+      assert.has_error(function() appendScript("W2aScriptAppendPosition", [[local w2aNew = 1]], beyondTheLast) end,
+        [[appendScript: cannot append to script (script "W2aScriptAppendPosition" at position ]] .. beyondTheLast .. [[ not found)]])
+      assert.equals([[local w2aOriginal = 1]], (getScript("W2aScriptAppendPosition", position)))
     end)
 
     it("adds the new code on a line of its own after the existing code", function()
@@ -1831,6 +2671,26 @@ describe("Tests the script API", function()
       appendScript("W2aScriptAppendDefault", [[local w2aDefaultAppended = 2]])
       assert.equals(firstBefore .. "\n" .. [[local w2aDefaultAppended = 2]],
         (getScript("W2aScriptAppendDefault", 1)))
+    end)
+
+    it("appends to the script at the requested position when several share a name", function()
+      local _, firstPosition = makeScript("W2aScriptAppendDuplicate", "", [[local w2aFirst = 1]])
+      local secondId, secondPosition = makeScript("W2aScriptAppendDuplicate", "", [[local w2aSecond = 2]])
+      assert.equals(secondId,
+        appendScript("W2aScriptAppendDuplicate", [[local w2aSecondAppended = 3]], secondPosition))
+      assert.equals([[local w2aFirst = 1]], (getScript("W2aScriptAppendDuplicate", firstPosition)))
+      assert.equals([[local w2aSecond = 2]] .. "\n" .. [[local w2aSecondAppended = 3]],
+        (getScript("W2aScriptAppendDuplicate", secondPosition)))
+    end)
+
+    it("still separates with a newline when the script it appends to is empty", function()
+      local _, position = makeScript("W2aScriptAppendEmpty", "", [[local w2aOriginal = 1]])
+      setScript("W2aScriptAppendEmpty", "", position)
+      -- the separator goes in unconditionally, so an empty body gains a leading
+      -- newline - harmless Lua, and how appendScript has always behaved
+      appendScript("W2aScriptAppendEmpty", [[local w2aAppended = 2]], position)
+      assert.equals("\n" .. [[local w2aAppended = 2]],
+        (getScript("W2aScriptAppendEmpty", position)))
     end)
 
     it("runs the appended code", function()
