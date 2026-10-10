@@ -26,38 +26,42 @@ function Geyser.Label:echo(message, color, format)
   if format then self:processFormatString(format) end
 
   local ft = self.formatTable
-  local fs = ft.fontSize
-  local alignment = ft.alignment
-  if alignment ~= "" then
-    alignment = string.format([[align="%s" ]], alignment)
+  local fs = ft.fontSize or tostring(self.fontSize)
+  local hex = color ~= "nocolor" and Geyser.Color.hex(color) or nil
+  -- the markup around the message is built from exactly these fields, so a
+  -- label echoed on every prompt builds it once rather than once per line
+  local wrap = self.echoWrap
+  if not (wrap and wrap.alignment == ft.alignment and wrap.bold == ft.bold and wrap.italics == ft.italics
+      and wrap.underline == ft.underline and wrap.strikethrough == ft.strikethrough
+      and wrap.font == self.font and wrap.fontSize == fs and wrap.hex == hex) then
+    wrap = {alignment = ft.alignment, bold = ft.bold, italics = ft.italics, underline = ft.underline,
+            strikethrough = ft.strikethrough, font = self.font, fontSize = fs, hex = hex}
+    local open, close = "", ""
+    if ft.bold then
+      open, close = "<b>", "</b>"
+    end
+    if ft.italics then
+      open, close = "<i>" .. open, close .. "</i>"
+    end
+    if ft.underline then
+      open, close = "<u>" .. open, close .. "</u>"
+    end
+    if ft.strikethrough then
+      open, close = "<s>" .. open, close .. "</s>"
+    end
+    if self.font and self.font ~= "" then
+      open, close = string.format('<font face ="%s">', self.font) .. open, close .. "</font>"
+    end
+    local alignment = ft.alignment
+    if alignment ~= "" then
+      alignment = string.format([[align="%s" ]], alignment)
+    end
+    local style = hex and [[ style="color: ]] .. hex .. [[; ]] or [[ style=" ]]
+    wrap.open = [[<div ]] .. alignment .. style .. "font-size: " .. fs .. [[pt; ">]] .. open
+    wrap.close = close .. [[</div>]]
+    self.echoWrap = wrap
   end
-  if ft.bold then
-    message = "<b>" .. message .. "</b>"
-  end
-  if ft.italics then
-    message = "<i>" .. message .. "</i>"
-  end
-  if ft.underline then
-    message = "<u>" .. message .. "</u>"
-  end
-  if ft.strikethrough then
-    message = "<s>" .. message .. "</s>"
-  end
-  if self.font and self.font ~= "" then
-    message = string.format('<font face ="%s">%s</font>', self.font, message)
-  end
-  if not fs then
-    fs = tostring(self.fontSize)
-  end
-  if color == "nocolor" then
-    color = [[ style=" ]]
-  else
-    color = [[ style="color: ]] .. Geyser.Color.hex(self.fgColor) .. [[; ]]
-  end
-  fs = "font-size: " .. fs .. "pt; "
-  message = [[<div ]] .. alignment .. color .. fs ..
-  [[">]] .. message .. [[</div>]]
-  echo(self.name, message)
+  echo(self.name, wrap.open .. message .. wrap.close)
   self:autoAdjustSize()
 end
 
@@ -253,22 +257,37 @@ function Geyser.Label:processFormatString(format)
   end
 end
 
---- Sets the font face for the label, use empty string to clear the font and use css/default. Returns true if the font changed, nil+error if not.
+--- Sets the font face for the label, use empty string to clear the font and use css/default.
+-- Returns true whenever it was given a string: an installed family, or a "Family Style"
+-- name, is applied to the label's widget font and remembered as the font database spells
+-- it, while a name the database does not list is passed on to the markup for Qt to
+-- substitute for, with a warning through debugc(). Only a font that is not a string is
+-- refused, with nil+error, and leaves the current font alone. A font inherited from
+-- a label used as a prototype was never set on this label's widget, so it reaches the
+-- markup only - self.font and getFont(self.name) can differ for that one case.
 -- @param font font face to use
 function Geyser.Label:setFont(font)
-  local af = getAvailableFonts()
-  if not (af[font] or font == "") then
-    local err = "Geyser.Label:setFont(): attempt to call setFont with font '" .. font .. "' which is not available, see getAvailableFonts() for valid options\n"
-    err = err .. "In the meantime, we will use a similar font which isn't the one you asked for but we hope is close enough"
-    debugc(err)
+  if type(font) ~= "string" then
+    local err = "font must be a string, got " .. type(font)
+    debugc("Geyser.Label:setFont(): " .. err .. "; the label keeps its current font")
+    return nil, err
+  end
+  if font ~= "" then
+    -- setFont() resolves the name the way it does for every other window (an
+    -- installed family, or a "Family Style" name split into base family and
+    -- weight) and applies it to the label's own widget font
+    local ok, err = setFont(self.name, font)
+    if ok then
+      -- the family as the font database spells it, so what is remembered here and
+      -- what the widget was given cannot drift apart
+      font = getFont(self.name)
+    else
+      debugc("Geyser.Label:setFont(): " .. err .. " - see getAvailableFonts() for valid options. Letting Qt pick the closest match it has")
+    end
   end
   self.font = font
-  -- Apply the profile's antialiasing settings to the label for static font compatibility
-  -- Use existing setFont() function with label name - this handles static fonts and antialiasing
-  if font ~= "" then
-    setFont(self.name, font)
-  end
   self:echo()
+  return true
 end
 
 --- return the size hint (the suggested size) of the label
@@ -439,11 +458,6 @@ function Geyser.Label:setFontSize(fontSize)
   self.formatTable.fontSize = fontSize
   self.format = self.format:gsub("%d", "")
   self.format = self.format .. fontSize
-  -- Apply the profile's antialiasing settings to the label when font size changes
-  -- Use existing setFont() function - it will preserve the font family and apply antialiasing
-  if self.font and self.font ~= "" then
-    setFont(self.name, self.font)
-  end
   self:echo()
 end
 
@@ -484,10 +498,94 @@ function Geyser.Label:clear()
 end
 
 --- Sets a background image for this label.
+-- An SVG file is drawn as a layer behind the label's text or movie, scaled to fit
+-- the label while keeping its proportions and re-rendered crisply on every resize
+-- - see setSvgTint, setSvgRotation and setSvgShear.
+-- It fills the area inside the label's border, and is not clipped to a
+-- border-radius, so a rounded label shows the SVG square in its corners.
+-- Any other image type is drawn at its own size as the label's content, in place
+-- of any text the label is showing. Which of the two it is comes from the file's
+-- content rather than from its name.
+-- resetBackgroundImage takes off the SVG layer, a raster image and a movie in one
+-- call, and leaves the label's text where it is.
+-- Returns true, or nil and an error message when the file cannot be read.
 -- @param imageFileName The image to use for a background image.
 function Geyser.Label:setBackgroundImage (imageFileName)
-  setBackgroundImage(self.name, imageFileName)
+  local ok, err = setBackgroundImage(self.name, imageFileName)
   self:autoAdjustSize()
+  return ok, err
+end
+
+--- Sets a tint color on the label's SVG background image.
+-- Every visible pixel of the SVG takes the given color and keeps its own
+-- transparency, so a multi-color SVG becomes a single-color silhouette.
+-- The tint is a property of the label, not of the document: it can be set before
+-- any SVG is there and applies as soon as one arrives, and no image operation
+-- changes it - it is kept until resetSvgTint is called.
+-- Accepts any color format supported by Geyser.Color.parse:
+-- RGB integers (r, g, b), hex string ("#ff0000"), or named color ("red").
+-- Returns true, or nil and an error message when the color cannot be read.
+-- @param r The red component (0-255), or a color string (e.g. "#ff0000", "red").
+-- @param g The green component (0-255). Omit when using a color string.
+-- @param b The blue component (0-255). Omit when using a color string.
+function Geyser.Label:setSvgTint (r, g, b)
+  -- Geyser.Color.parse returns nil for a component a short hex string like "#ff"
+  -- has no digits for, and raises rather than returning it for the one after that
+  local parsed, red, green, blue = pcall(Geyser.Color.parse, r, g, b)
+  if not (parsed and red and green and blue) then
+    if type(r) == "string" then
+      -- the global resolves colour names itself and explains what it cannot
+      return setSvgTint(self.name, r)
+    end
+    return nil, "setSvgTint: could not parse the colour given"
+  end
+  return setSvgTint(self.name, red, green, blue)
+end
+
+--- Resets the tint color on the label's SVG background image,
+-- restoring the original SVG colors.
+function Geyser.Label:resetSvgTint ()
+  return resetSvgTint(self.name)
+end
+
+--- Sets the rotation angle for the label's SVG background image.
+-- The SVG is rotated around its center; label text and background are unaffected.
+-- Content rotated beyond the label's edges is clipped, so a square image loses
+-- its corners at 45 degrees - a circular design, or padding inside the SVG,
+-- avoids that.
+-- Like the tint, the angle is a property of the label: it can be set before any
+-- SVG is there and applies as soon as one arrives, and no image operation changes
+-- it - it is kept until resetSvgRotation or resetSvgTransform is called.
+-- @param angle Rotation angle in degrees (positive = clockwise).
+function Geyser.Label:setSvgRotation (angle)
+  return setSvgRotation(self.name, angle)
+end
+
+--- Resets the SVG background image rotation to 0 degrees.
+function Geyser.Label:resetSvgRotation ()
+  return resetSvgRotation(self.name)
+end
+
+--- Sets the shear (skew) for the label's SVG background image.
+-- The SVG is sheared around its center; label text and background are unaffected.
+-- As with rotation, content sheared outside the label is clipped.
+-- Like the tint, the shear is a property of the label: it can be set before any
+-- SVG is there and applies as soon as one arrives, and no image operation changes
+-- it - it is kept until resetSvgShear or resetSvgTransform is called.
+-- @param shearX Horizontal shear factor.
+-- @param shearY Vertical shear factor.
+function Geyser.Label:setSvgShear (shearX, shearY)
+  return setSvgShear(self.name, shearX, shearY)
+end
+
+--- Resets the SVG background image shear to (0, 0).
+function Geyser.Label:resetSvgShear ()
+  return resetSvgShear(self.name)
+end
+
+--- Resets all SVG transforms (rotation and shear) but preserves tint.
+function Geyser.Label:resetSvgTransform ()
+  return resetSvgTransform(self.name)
 end
 
 --- Sets a tiled background image for this label.
@@ -987,12 +1085,16 @@ function Geyser.Label:new (cons, container)
 
   -- workaround for createLabel possibly being overwritten and not understanding the new parent argument
   -- see https://github.com/Mudlet/Mudlet/issues/3393
+  local ok, err
   if me.windowname == "main" then
-    createLabel(me.name, me:get_x(), me:get_y(),
+    ok, err = createLabel(me.name, me:get_x(), me:get_y(),
       me:get_width(), me:get_height(), me.fillBg)
   else
-    createLabel(me.windowname, me.name, me:get_x(), me:get_y(),
+    ok, err = createLabel(me.windowname, me.name, me:get_x(), me:get_y(),
       me:get_width(), me:get_height(), me.fillBg)
+  end
+  if not mudlet.elementCreated(me.windowname, me.name, ok, err) then
+    printError(string.format("Geyser.Label '%s' was not created: %s", me.name, err or "unknown error"), false, false)
   end
 -- Geyser.Container:new() settles the hidden constraint before there is a widget to hide, so the hide is made good here
   if me.hidden or me.auto_hidden then
@@ -1003,7 +1105,19 @@ function Geyser.Label:new (cons, container)
 
   -- Set any defined colors
   Geyser.Color.applyColors(me)
-  me:echo()
+  -- the constraints table is copied wholesale, so a font entry lands in me.font
+  -- without ever reaching the label; clear it first and put it back through
+  -- setFont(), which echoes for itself when it takes the font, and does not when
+  -- it refuses a font that is not a string. Nothing is written to me.font when
+  -- the constraints carry no font: an own field would shadow a prototype's.
+  if cons.font ~= nil then
+    me.font = ""
+    if not me:setFont(cons.font) then
+      me:echo()
+    end
+  else
+    me:echo()
+  end
 
   -- Set up mouse hover as the callback if we have one
   if cons.nestflyout then
@@ -1257,10 +1371,14 @@ if restyle then
   myMenu.MenuLabels[name].stylesheet = nil
 end
 
-local Style = configLabel["Style"..depth] or configLabel["Style"]
-local MenuStyle = myMenu.MenuLabels[name].stylesheet or configLabel["MenuStyle"..depth] or configLabel["MenuStyle"]
-MenuStyle = MenuStyle or configLabel.MenuStyleMode[string.lower(Style)]
-myMenu.MenuLabels[name]:setStyleSheet(MenuStyle)
+-- every addMenuLabel walks the whole menu again, and Qt restyles a label even
+-- when it is handed the sheet it already has, so only unstyled items get one
+if not myMenu.MenuLabels[name].stylesheet then
+  local Style = configLabel["Style"..depth] or configLabel["Style"]
+  local MenuStyle = configLabel["MenuStyle"..depth] or configLabel["MenuStyle"]
+  MenuStyle = MenuStyle or configLabel.MenuStyleMode[string.lower(Style)]
+  myMenu.MenuLabels[name]:setStyleSheet(MenuStyle)
+end
 end
 
 -- internal function to create the right click Menu Labels

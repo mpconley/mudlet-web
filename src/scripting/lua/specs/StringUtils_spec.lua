@@ -20,6 +20,11 @@ describe("Tests StringUtils.lua functions", function()
       actualLength = actual:len()
       assert.equals(expectedLength, actualLength)
     end)
+
+    it("should return an empty string when asked for no characters at all", function()
+      assert.equals("", ("This is a test"):cut(0))
+      assert.equals("", (""):cut(0))
+    end)
   end)
 
   describe("Tests the functionality of string.enclose", function()
@@ -47,6 +52,14 @@ describe("Tests StringUtils.lua functions", function()
       local s = "[=[[[This is a test]]]=]"
       local errfn = function() string.enclose(s,1) end
       assert.has_error(errfn, "error: maxlevel too low, 1")
+    end)
+
+    it("should need a maxlevel above the level it actually settles on", function()
+      -- the ceiling is checked before the level is tried, so a string that needs
+      -- one = still fails at maxlevel 1 and only succeeds from 2 upwards
+      assert.has_error(function() string.enclose("[[x]]", 1) end, "error: maxlevel too low, 1")
+      assert.equals("[=[[[x]]]=]", string.enclose("[[x]]", 2))
+      assert.has_error(function() string.enclose("plain", 0) end, "error: maxlevel too low, 0")
     end)
   end)
 
@@ -89,6 +102,20 @@ describe("Tests StringUtils.lua functions", function()
       local str = "123abc"
       local pattern = string.genNocasePattern(str)
       assert.is_truthy(str:find(pattern))
+    end)
+
+    it("should return only the pattern, not gsub's replacement count", function()
+      -- returning gsub directly would hand a second value to every caller, and
+      -- string.format("%s", str:genNocasePattern()) would still look right
+      assert.equals(1, select("#", ("abc"):genNocasePattern()))
+    end)
+
+    it("should leave bytes that are not ASCII letters alone", function()
+      -- %a is byte-wise, so the two bytes of á cannot be case-folded and have to
+      -- survive untouched or the pattern stops matching its own source string
+      local pattern = ("ábc"):genNocasePattern()
+      assert.equals("á[bB][cC]", pattern)
+      assert.is_truthy(("ábc"):find(pattern))
     end)
   end)
 
@@ -215,6 +242,15 @@ describe("Tests StringUtils.lua functions", function()
     it("should leave a string that does not start with a lowercase letter unchanged", function()
       assert.equals("123abc", string.title("123abc"))
     end)
+
+    it("should return only the titled string, not gsub's replacement count", function()
+      assert.equals(1, select("#", ("abc"):title()))
+      assert.equals(1, select("#", ("Abc"):title()))
+    end)
+
+    it("should only capitalise the first letter, not every word", function()
+      assert.equals("This is a test", ("this is a test"):title())
+    end)
   end)
 
   describe("Tests the functionality of string.trim", function()
@@ -242,6 +278,28 @@ describe("Tests StringUtils.lua functions", function()
 
     it("should strip leading and trailing tabs and newlines, not just spaces", function()
       assert.equals("this is a test", ("\t\n  this is a test \n\t"):trim())
+    end)
+
+    it("should leave whitespace inside the string alone", function()
+      assert.equals("a  b", ("  a  b  "):trim())
+      assert.equals("", ("   "):trim())
+    end)
+
+    it("should keep long runs of whitespace inside the string", function()
+      local inner = "HP: 100" .. string.rep(" ", 200) .. "MP:\t\t50" .. string.rep(" ", 200) .. "EP: 9"
+      assert.equals(inner, ("   " .. inner .. string.rep(" ", 300)):trim())
+      assert.equals("", (string.rep(" \t\n", 500)):trim())
+      assert.equals("", (""):trim())
+      assert.equals("x", (string.rep(" ", 500) .. "x"):trim())
+    end)
+
+    it("should trim a number the way it trims its string form", function()
+      assert.equals("42", string.trim(42))
+    end)
+
+    it("should return only the trimmed string, not gsub's replacement count", function()
+      assert.equals(1, select("#", ("  a  "):trim()))
+      assert.equals(1, select("#", ("a"):trim()))
     end)
   end)
 
@@ -276,6 +334,61 @@ describe("Tests StringUtils.lua functions", function()
         assert.equals(replacement, string.patternEscape(original))
       end
     end)
+
+    -- the twelve pattern magic characters gain a "%" in front, every other
+    -- byte - other punctuation, control characters, NUL and bytes >= 0x80 -
+    -- passes through untouched
+    local magic = "%^$()[].*+-?"
+    local function expectedEscape(str)
+      local out = {}
+      for i = 1, #str do
+        local c = str:sub(i, i)
+        out[#out + 1] = magic:find(c, 1, true) and ("%" .. c) or c
+      end
+      return table.concat(out)
+    end
+
+    it("Should escape exactly the magic characters among all 256 byte values", function()
+      for byte = 0, 255 do
+        local c = string.char(byte)
+        assert.equals(expectedEscape(c), string.patternEscape(c), "byte " .. byte)
+        assert.equals(expectedEscape("a" .. c .. "b" .. c), string.patternEscape("a" .. c .. "b" .. c), "byte " .. byte)
+      end
+      local all = {}
+      for byte = 0, 255 do
+        all[#all + 1] = string.char(byte)
+      end
+      all = table.concat(all)
+      assert.equals(expectedEscape(all), string.patternEscape(all))
+    end)
+
+    it("Should leave multibyte UTF-8 text alone", function()
+      assert.equals("Café %(été%) 👊 %[ü%]", string.patternEscape("Café (été) 👊 [ü]"))
+      assert.equals("naïve %- 日本語%.", string.patternEscape("naïve - 日本語."))
+    end)
+
+    it("Should return a pattern that finds the original text literally", function()
+      for _, original in ipairs({"a.b", "[x]", "100%", "^start$", "(a+b)*c-d?", "Café (été) 👊"}) do
+        local escaped = string.patternEscape(original)
+        assert.are.same({1, #original}, {string.find(original, escaped)})
+        assert.equals(original, string.match("xx" .. original .. "yy", escaped))
+      end
+    end)
+
+    it("Should return one value, and an empty string for an empty string", function()
+      assert.equals(1, select("#", string.patternEscape("a.b")))
+      assert.equals(1, select("#", ("a.b"):patternEscape()))
+      assert.equals("", string.patternEscape(""))
+    end)
+
+    it("Should raise an error for a non-string argument", function()
+      for _, bad in ipairs({5, {}, true}) do
+        local ok, err = pcall(string.patternEscape, bad)
+        assert.is_false(ok)
+        assert.is_truthy(tostring(err):find("string.patternEscape: bad argument #1 type", 1, true), tostring(err))
+      end
+      assert.has_error(function() string.patternEscape() end)
+    end)
   end)
 
   describe("Tests the functionality of utf8.patternEscape", function()
@@ -307,6 +420,36 @@ describe("Tests StringUtils.lua functions", function()
       }
       for original, replacement in pairs(replacements) do
         assert.equals(replacement, utf8.patternEscape(original))
+      end
+    end)
+
+    it("Should escape exactly the magic characters among all ASCII characters", function()
+      local magic = "%^$()[].*+-?"
+      for byte = 0, 127 do
+        local c = string.char(byte)
+        local expected = magic:find(c, 1, true) and ("%" .. c) or c
+        assert.equals(expected, utf8.patternEscape(c), "byte " .. byte)
+        assert.equals("é" .. expected .. "👊" .. expected, utf8.patternEscape("é" .. c .. "👊" .. c), "byte " .. byte)
+      end
+    end)
+
+    it("Should leave multibyte characters whole", function()
+      assert.equals("naïve %- 日本語%. %(👊%)", utf8.patternEscape("naïve - 日本語. (👊)"))
+      local escaped = utf8.patternEscape("Café (été) [ü]")
+      assert.equals("Café %(été%) %[ü%]", escaped)
+      assert.equals("Café (été) [ü]", utf8.match("xx Café (été) [ü] yy", escaped))
+    end)
+
+    it("Should return one value, and an empty string for an empty string", function()
+      assert.equals(1, select("#", utf8.patternEscape("a.b")))
+      assert.equals("", utf8.patternEscape(""))
+    end)
+
+    it("Should raise an error for a non-string argument", function()
+      for _, bad in ipairs({5, {}, true}) do
+        local ok, err = pcall(utf8.patternEscape, bad)
+        assert.is_false(ok)
+        assert.is_truthy(tostring(err):find("utf8.patternEscape: bad argument #1 type", 1, true), tostring(err))
       end
     end)
   end)
@@ -362,6 +505,141 @@ describe("Tests StringUtils.lua functions", function()
 
     it("should error when passed in anything but a string", function()
       assert.has_error(function() f(true) end, "f: bad argument #1 type (str as string expected, got boolean)")
+    end)
+
+    it("should raise the compile error of an expression that is not valid Lua", function()
+      -- swallowing this would silently drop the whole interpolation from the
+      -- string, which is far harder to notice than a raised error
+      assert.error_matches(function() f("{1+}") end, "unexpected symbol")
+      assert.error_matches(function() f("{ this is not lua }") end, "expected near")
+    end)
+
+    it("should interpolate a global and render a missing name as nil", function()
+      _G.stringUtilsSpecGlobal = "seen"
+      local interpolated = f("a {stringUtilsSpecGlobal} b")
+      _G.stringUtilsSpecGlobal = nil
+      assert.equals("a seen b", interpolated)
+      assert.equals("nil", f("{stringUtilsSpecGlobal}"))
+    end)
+
+    it("should read the current value of a name each time the same string is used", function()
+      for i = 1, 3 do
+        assert.equals("i is " .. i, f("i is {i}"))
+      end
+    end)
+
+    it("should give a nested f the locals in scope where it runs", function()
+      local outerName = "outer"
+      local function inner()
+        local innerName = "inner"
+        -- not a tail call, which would take this frame and its locals off the stack
+        local result = f("{innerName}/{outerName}")
+        return result
+      end
+      assert.equals("inner/outer", inner())
+      assert.equals("[inner/outer] outer", f("[{inner()}] {outerName}"))
+    end)
+
+    it("should interpolate a variable named like one of f's own locals", function()
+      do
+        local lookup, outer_env, code = "local lookup", "local outer_env", "local code"
+        assert.equals("local lookup/local outer_env/local code", f("{lookup}/{outer_env}/{code}"))
+      end
+
+      local was = rawget(_G, "lookup")
+      _G.lookup = {x = 42}
+      local ok, result = pcall(f, "{lookup.x}")
+      _G.lookup = was
+      assert.is_true(ok, tostring(result))
+      assert.equals("42", result)
+    end)
+
+    it("should not let an outer f's locals shadow those of a function it calls", function()
+      local code, block, exp_env = "mine", "my block", "my env"
+      local function inner()
+        return f("{code}/{block}/{exp_env}")
+      end
+      assert.equals("[mine/my block/my env]", f("[{inner()}]"))
+    end)
+
+    -- a function made in an expression writes its globals into that
+    -- expression's own environment, which nothing else may see
+    it("should not let a global assigned inside one expression leak into the next", function()
+      assert.equals("1", f("{(function() fstringSpecLeak = 1 return fstringSpecLeak end)()}"))
+      assert.is_nil(rawget(_G, "fstringSpecLeak"))
+      assert.equals("nil", f("{fstringSpecLeak}"))
+    end)
+
+    it("should not let an expression that raised leave a global behind", function()
+      assert.is_false(pcall(f, "{(function() fstringSpecStale = 'stale' error('boom') end)()}"))
+      local fstringSpecStale = "fresh"
+      assert.equals("fresh", f("{fstringSpecStale}"))
+    end)
+
+    it("should keep an expression's globals through an f nested inside it", function()
+      assert.equals("1", f("{(function() fstringSpecNested = 1 local _ = f('{2}') return fstringSpecNested end)()}"))
+    end)
+
+    it("should keep the globals of a function an expression made for later", function()
+      local store = {}
+      assert.equals("made", f("{(function() store.bump = function() fstringSpecCount = (fstringSpecCount or 0) + 1 return fstringSpecCount end return 'made' end)()}"))
+      assert.equals(1, store.bump())
+      assert.equals(2, store.bump())
+      local fstringSpecCount = "local"
+      assert.equals("local", f("{fstringSpecCount}"))
+      assert.equals(3, store.bump())
+    end)
+
+    it("should not let a function an expression calls leave a global in its environment", function()
+      local setter = function(k, v)
+        getfenv(2)[k] = v
+        return "set"
+      end
+      -- concatenated so the call is not a tail call, which would leave getfenv(2) nothing to find
+      assert.equals("set", f("{setter('fstringSpecPlanted', 'planted') .. ''}"))
+      local fstringSpecPlanted = "local"
+      assert.equals("local", f("{fstringSpecPlanted}"))
+    end)
+
+    it("should keep what a helper wrote into an expression's environment through a nested f", function()
+      local setter = function(k, v)
+        getfenv(2)[k] = v
+        return ""
+      end
+      local nested = function()
+        return f("{1}")
+      end
+      assert.equals("1kept", f("{setter('fstringSpecHelperWrite', 'kept') .. nested() .. fstringSpecHelperWrite}"))
+    end)
+
+    it("should give every evaluation an environment whose lookup a helper cannot spoil for the next", function()
+      local spoiler = function()
+        setmetatable(getfenv(2), {})
+        return "spoilt"
+      end
+      assert.equals("spoilt", f("{spoiler() .. ''}"))
+      local hp = 42
+      assert.equals("42", f("{hp}"))
+    end)
+
+    it("should read globals from the environment f itself is given", function()
+      local sandbox = setmetatable({fstringSpecSandboxed = "inside"}, {__index = _G})
+      local original = getfenv(f)
+      _G.fstringSpecOutside = "outside"
+      setfenv(f, sandbox)
+      local ok, inside, outside = pcall(function()
+        return f("{fstringSpecSandboxed}"), f("{fstringSpecOutside}")
+      end)
+      setfenv(f, original)
+      _G.fstringSpecOutside = nil
+      assert.is_true(ok, tostring(inside))
+      assert.equals("inside", inside)
+      assert.equals("nil", outside)
+    end)
+
+    it("should not treat % as a format directive", function()
+      assert.equals("100% sure", f("100% sure"))
+      assert.equals("50% of 4 is 2", f("50% of 4 is {4/2}"))
     end)
   end)
 end)
