@@ -17,6 +17,24 @@ describe("Tests TBuffer OSC sequence handling", function()
     return nil
   end
 
+  -- the colour a word on that line ended up with, for the cases where the text
+  -- coming out right is not enough and the formatting has to be checked too
+  local function foregroundOf(needle, word)
+    local lastLine = getLastLineNumber("main")
+    local first = math.max(0, lastLine - 15)
+    local lines = getLines("main", first, lastLine + 1)
+    for i = #lines, 1, -1 do
+      if lines[i]:find(needle, 1, true) then
+        moveCursor("main", 0, first + i - 1)
+        assert.are_not.equal(-1, selectString("main", word, 1))
+        local foreground = getTextFormat("main").foreground
+        moveCursorEnd("main")
+        return foreground
+      end
+    end
+    return nil
+  end
+
   describe("Tests the protection against buffer underflow in OSC sequences", function()
     
     it("should handle OSC sequences at buffer start without crashing", function()
@@ -275,10 +293,10 @@ describe("Tests TBuffer OSC sequence handling", function()
 
   end)
 
-  -- A CSI parameter string may only carry one of '<', '=', '>' or '?' in its
-  -- FIRST byte, where it marks a private/reserved sequence that Mudlet does not
-  -- interpret; after that only "0-9:;" are allowed. Getting those two sets the
-  -- wrong way round leaves the tail of such a sequence on screen as game text.
+  -- Every byte of a CSI parameter string is in "0-9:;<=>?"; one of '<', '=',
+  -- '>' or '?' in the FIRST byte marks the sequence as private/reserved, which
+  -- Mudlet does not interpret. Consuming a narrower set anywhere leaves the
+  -- tail of such a sequence on screen as game text.
   describe("Tests private/reserved CSI sequences", function()
 
     it("should consume a private DEC sequence that hides the cursor", function()
@@ -318,6 +336,166 @@ describe("Tests TBuffer OSC sequence handling", function()
     it("should still consume an SGR sequence with no parameters", function()
       assert.is_true(feedTriggers("CSISGR2(\027[mplain)CSISGR2\n"))
       assert.equals("CSISGR2(plain)CSISGR2", findRecentLine("CSISGR2"))
+    end)
+
+    -- SlothMUD ends every coloured span with this. '>' is a parameter byte, not
+    -- a terminator, so the "m" is the final byte and nothing may reach the
+    -- screen.
+    it("should consume a reserved byte that appears after the first parameter", function()
+      assert.is_true(feedTriggers("CSIMID1(\027[0;37;4>mtext)CSIMID1\n"))
+      assert.equals("CSIMID1(text)CSIMID1", findRecentLine("CSIMID1"))
+    end)
+
+    it("should consume a reserved byte in the middle of a parameter", function()
+      assert.is_true(feedTriggers("CSIMID2(\027[0;3>7mtext)CSIMID2\n"))
+      assert.equals("CSIMID2(text)CSIMID2", findRecentLine("CSIMID2"))
+    end)
+
+    it("should consume every reserved byte appearing after the first parameter", function()
+      assert.is_true(feedTriggers("CSIMID3(\027[0;37;4<m\027[0;37;4=m\027[0;37;4?m)CSIMID3\n"))
+      assert.equals("CSIMID3()CSIMID3", findRecentLine("CSIMID3"))
+    end)
+
+    -- The parameters either side of the unusable one still have to be applied,
+    -- so both runs have to come out the colour a sequence without it gives.
+    it("should still apply the usable parameters around a reserved byte", function()
+      assert.is_true(feedTriggers("CSIMID4(\027[0;32mgreen\027[0;37;4>mwhite)CSIMID4\n"))
+      assert.equals("CSIMID4(greenwhite)CSIMID4", findRecentLine("CSIMID4"))
+      local green = foregroundOf("CSIMID4", "green")
+      local white = foregroundOf("CSIMID4", "white")
+      assert.are_not.same(green, white)
+
+      assert.is_true(feedTriggers("CSIREF4(\027[0;32mgreen\027[0;37mwhite)CSIREF4\n"))
+      assert.are.same(foregroundOf("CSIREF4", "green"), green)
+      assert.are.same(foregroundOf("CSIREF4", "white"), white)
+    end)
+
+    -- A CSI that never gets a final byte is unusable, but the byte that ends
+    -- the scan is not part of it and has to be left alone.
+    it("should not swallow the escape that ends a sequence with no final byte", function()
+      assert.is_true(feedTriggers("CSINOFIN1(\027[0;4>\027[0mtext)CSINOFIN1\n"))
+      assert.equals("CSINOFIN1(text)CSINOFIN1", findRecentLine("CSINOFIN1"))
+    end)
+
+    it("should not swallow the newline that ends a sequence with no final byte", function()
+      assert.is_true(feedTriggers("CSINOFIN2(\027[0;4>\nCSINOFIN3)\n"))
+      assert.equals("CSINOFIN3)", findRecentLine("CSINOFIN3"))
+    end)
+
+    -- Consuming a reserved byte puts it in front of the SGR decoder, so a
+    -- parameter it has made unreadable must change nothing rather than be
+    -- read as far as it parses or fall back to colour zero.
+    it("should apply nothing from a parameter a reserved byte has broken", function()
+      assert.is_true(feedTriggers("CSIBAD1(\027[0;37mplain\027[1<2mafter)CSIBAD1\n"))
+      assert.equals("CSIBAD1(plainafter)CSIBAD1", findRecentLine("CSIBAD1"))
+      assert.are.same(foregroundOf("CSIBAD1", "plain"), foregroundOf("CSIBAD1", "after"))
+    end)
+
+    it("should apply nothing from a colour index a reserved byte has broken", function()
+      assert.is_true(feedTriggers("CSIBAD2(\027[0;37mplain\027[38;5;1<2mafter)CSIBAD2\n"))
+      assert.equals("CSIBAD2(plainafter)CSIBAD2", findRecentLine("CSIBAD2"))
+      assert.are.same(foregroundOf("CSIBAD2", "plain"), foregroundOf("CSIBAD2", "after"))
+    end)
+
+    -- A CSI carrying an "intermediate" byte (space, or one of "!\"#$%&'()*+,-./")
+    -- is one Mudlet does not act on: it consumes the parameters and the
+    -- intermediate byte and gives up, so the final byte after them is left over
+    -- and shows as text, which TBuffer.cpp calls a limitation rather than intent.
+    it("should consume the parameters of a sequence with an intermediate byte", function()
+      assert.is_true(feedTriggers("CSIINT1(\027[1 pX)CSIINT1\n"))
+      local payload = findRecentLine("CSIINT1"):match("^CSIINT1%((.*)%)CSIINT1$")
+      -- the parameters and the intermediate byte going is what this holds. The
+      -- leftover final byte is the limitation, not the intent, so both readings
+      -- pass and swallowing it one day does not have to come with a red spec.
+      assert.is_truthy(payload == "pX" or payload == "X", tostring(payload))
+    end)
+
+    -- The only case where the intermediate byte is also the last byte, so the
+    -- only one holding the bounds check on the look ahead for the final byte.
+    it("should consume an intermediate byte that is the last byte of the data", function()
+      assert.is_true(feedTriggers("CSIINT2(\027[1 "))
+      assert.is_true(feedTriggers("Y)CSIINT2\n"))
+      assert.equals("CSIINT2(Y)CSIINT2", findRecentLine("CSIINT2"))
+    end)
+
+    -- MAX_CSI_SEQUENCE_LENGTH in TBuffer.cpp: past it the parameter string is
+    -- thrown away rather than buffered without bound while a server that never
+    -- sends a final byte keeps feeding parameter bytes.
+    local lengthCap = 4096
+
+    -- no-op parameters padding a green one out to the given parameter string
+    -- length, so a discard and a parse can be told apart by the colour - either
+    -- way nothing of the sequence reaches the screen
+    local function paddedGreen(length)
+      local oddPadding = length % 2 == 1 and ";" or ""
+      return string.rep("0;", math.floor((length - 2) / 2)) .. oddPadding .. "32"
+    end
+
+    -- The two lengths either side of the cap, rather than a comfortable margin
+    -- on each side: the check is ">= MAX_CSI_SEQUENCE_LENGTH" on the parameter
+    -- string alone, and only these two tell that apart from a ">".
+    it("should still act on a parameter string one byte under the length cap", function()
+      assert.is_true(feedTriggers("\027[0mCSICAP1(\027[" .. paddedGreen(lengthCap - 1) .. "mgreen\027[0m)CSICAP1\n"))
+      assert.equals("CSICAP1(green)CSICAP1", findRecentLine("CSICAP1"))
+      assert.is_true(feedTriggers("\027[0mCSICAP2(green)CSICAP2\n"))
+      assert.are_not.same(foregroundOf("CSICAP1", "green"), foregroundOf("CSICAP2", "green"))
+    end)
+
+    it("should discard a parameter string that is exactly the length cap", function()
+      assert.is_true(feedTriggers("\027[0mCSICAP3(\027[" .. paddedGreen(lengthCap) .. "mgreen\027[0m)CSICAP3\n"))
+      assert.equals("CSICAP3(green)CSICAP3", findRecentLine("CSICAP3"))
+      assert.is_true(feedTriggers("\027[0mCSICAP4(green)CSICAP4\n"))
+      assert.are.same(foregroundOf("CSICAP3", "green"), foregroundOf("CSICAP4", "green"))
+    end)
+
+  end)
+
+  -- CUF (cursor forward) is emulated by writing spaces, as one game uses it
+  describe("Tests the CUF cursor forward sequence", function()
+
+    it("should move forward by the requested number of spaces", function()
+      assert.is_true(feedTriggers("CUF1(\027[3C)CUF1\n"))
+      assert.equals("CUF1(   )CUF1", findRecentLine("CUF1"))
+    end)
+
+    -- the count comes from the game, so it has to be clamped: this one
+    -- sequence would otherwise ask for about 24GB of spaces
+    it("should not move further than the wrap width", function()
+      local wrapAt = getWindowWrap("main")
+      local before = getLastLineNumber("main")
+      assert.is_true(feedTriggers("CUF2(\027[999999999C)CUF2\n"))
+      local text = table.concat(getLines("main", before, getLastLineNumber("main") + 1))
+      local spaces = text:match("CUF2%(( *)%)CUF2")
+      assert.is_truthy(spaces, text:sub(1, 200))
+      assert.is_true(#spaces < wrapAt, "moved forward " .. #spaces .. " columns with a wrap of " .. wrapAt)
+    end)
+
+    -- wrapping drops the spaces it breaks at, so the length is read from the
+    -- line triggers see, before it is wrapped
+    it("should stop at the right margin over a run of moves", function()
+      local wrapAt = getWindowWrap("main")
+      local seen
+      local trigger = tempRegexTrigger("^CUF3\\(", function()
+        seen = #line
+      end)
+      local ok = feedTriggers("CUF3(" .. string.rep("\027[1000C", 1000) .. ")CUF3\n")
+      killTrigger(trigger)
+      assert.is_true(ok)
+      assert.is_truthy(seen)
+      assert.is_true(seen <= wrapAt + 5, "a run of moves made a line of " .. seen .. " characters with a wrap of " .. wrapAt)
+    end)
+
+    it("should not move further than 1000 columns when the wrap is wider", function()
+      local wrapAt = getWindowWrap("main")
+      setWindowWrap("main", 5000)
+      local before = getLastLineNumber("main")
+      local ok = feedTriggers("CUF4(\027[999999999C)CUF4\n")
+      setWindowWrap("main", wrapAt)
+      assert.is_true(ok)
+      local text = table.concat(getLines("main", before, getLastLineNumber("main") + 1))
+      local spaces = text:match("CUF4%(( *)%)CUF4")
+      assert.is_truthy(spaces, text:sub(1, 200))
+      assert.is_true(#spaces < 1000, "moved forward " .. #spaces .. " columns with a wrap of 5000")
     end)
 
   end)
@@ -527,6 +705,185 @@ describe("Tests TBuffer OSC sequence handling", function()
             "revealing a link whose line was trimmed away rewrote line " .. lineNumber)
         end
       end)
+    end)
+
+    -- deleteLine() shifts every line below the one it removes, so a tracked
+    -- link's recorded line number stops matching where its text now sits - the
+    -- same defect as above reached by the route a trigger gag takes.
+    it("does not rewrite an unrelated line after deleteLine() moved the link's line", function()
+      if not os.getenv("MUDLET_TEST_MODE") then
+        pending("waiting for the reveal timer needs MUDLET_TEST_MODE")
+        return
+      end
+      withSmallBuffer(function()
+        clearWindow()
+        for i = 1, 3 do echo("oscdelseed " .. i .. "\n") end
+        local link = "\027]8;;send:osc8del?config={\"visibility\":{\"action\":\"reveal\",\"delay\":3000}}\027\\HIDDENWORD\027]8;;\027\\"
+        assert.is_true(feedTriggers("OSCDEL1(" .. link .. ")OSCDEL1\n"))
+        local registeredAt, concealed = findLine("OSCDEL1")
+        assert.is_truthy(registeredAt and registeredAt < 20, "the link did not land at a low buffer index")
+        -- concealment proves the link registered, so there is tracked state to go stale
+        assert.equals("OSCDEL1(          )OSCDEL1", concealed)
+
+        -- fillers must be longer than the link's startColumn + length, or
+        -- performReveal() bounds-checks out and the case passes unfixed
+        for i = 1, 12 do echo("oscdelfiller padded out well past the link column " .. i .. "\n") end
+
+        -- take a line above the link, so everything below it moves up one
+        assert.is_true(moveCursor(0, 0))
+        deleteLine()
+        local movedTo = findLine("OSCDEL1")
+        assert.equals(registeredAt - 1, movedTo, "deleting an earlier line did not move the link's line up")
+
+        local lastLine = getLastLineNumber("main")
+        local snapshot = {}
+        for lineNumber = 0, lastLine do
+          snapshot[lineNumber] = getLines("main", lineNumber, lineNumber + 1)[1]
+        end
+
+        pumpEvents(3500)
+        -- the link's own line is the one that should change: it reveals where the
+        -- text actually sits now, and every other line is left alone
+        assert.equals("OSCDEL1(HIDDENWORD)OSCDEL1", getLines("main", movedTo, movedTo + 1)[1],
+          "the reveal did not land on the line the link moved to")
+        for lineNumber = 0, lastLine do
+          if lineNumber ~= movedTo then
+            assert.equals(snapshot[lineNumber], getLines("main", lineNumber, lineNumber + 1)[1],
+              "a link tracked across deleteLine() rewrote line " .. lineNumber)
+          end
+        end
+      end)
+    end)
+
+    -- clearWindow() discards every line, so a tracked link's line number stops
+    -- meaning anything - the same defect as above reached by a second route. The
+    -- buffer is refilled afterwards so a broken reveal has something to overwrite.
+    it("does not rewrite an unrelated line after clearWindow() discarded the link's line", function()
+      if not os.getenv("MUDLET_TEST_MODE") then
+        pending("waiting for the reveal timer needs MUDLET_TEST_MODE")
+        return
+      end
+      withSmallBuffer(function()
+        clearWindow()
+        for i = 1, 3 do echo("oscclrseed " .. i .. "\n") end
+        local link = "\027]8;;send:osc8clr?config={\"visibility\":{\"action\":\"reveal\",\"delay\":3000}}\027\\HIDDENWORD\027]8;;\027\\"
+        assert.is_true(feedTriggers("OSCCLR1(" .. link .. ")OSCCLR1\n"))
+        local registeredAt, concealed = findLine("OSCCLR1")
+        assert.is_truthy(registeredAt and registeredAt < 20, "the link did not land at a low buffer index")
+        -- concealment proves the link registered, so there is tracked state for
+        -- clearWindow() to leave behind
+        assert.equals("OSCCLR1(          )OSCCLR1", concealed)
+
+        clearWindow()
+        assert.is_nil(findLine("OSCCLR1"), "clearWindow() left the link's line in the buffer")
+
+        -- fillers must be longer than the link's startColumn + length, or
+        -- performReveal() bounds-checks out and the case passes unfixed
+        for i = 1, 12 do echo("oscclrfiller padded out well past the link column " .. i .. "\n") end
+
+        local lastLine = getLastLineNumber("main")
+        local snapshot = {}
+        for lineNumber = 0, lastLine do
+          snapshot[lineNumber] = getLines("main", lineNumber, lineNumber + 1)[1]
+        end
+
+        pumpEvents(3500)
+        for lineNumber = 0, lastLine do
+          assert.equals(snapshot[lineNumber], getLines("main", lineNumber, lineNumber + 1)[1],
+            "a link tracked across clearWindow() rewrote line " .. lineNumber)
+        end
+      end)
+    end)
+  end)
+
+  -- A link the game marks as already selected is drawn in its selected style,
+  -- which takes over from the formatting the game wrapped it in once the line
+  -- it is on is committed - and a flush marker can commit the start of that
+  -- line, link and all, before the rest of it has arrived
+  describe("Tests OSC 8 links that start out selected", function()
+    local italic = "\027[3m"
+    local selectedLink = "\027]8;;send:x?config={\"selection\":{\"group\":\"g\",\"value\":\"v\",\"selected\":true},"
+      .. "\"style\":{\"color\":\"#00ff00\",\"selected\":{\"color\":\"#ff0000\"}}}\027\\"
+    local closeLink = "\027]8;;\027\\\027[0m"
+
+    local function assertSelectedStyle(needle, word)
+      local lastLine = getLastLineNumber("main")
+      local first = math.max(0, lastLine - 15)
+      local lines = getLines("main", first, lastLine + 1)
+      for i = #lines, 1, -1 do
+        if lines[i]:find(needle, 1, true) then
+          moveCursor("main", 0, first + i - 1)
+          assert.are_not.equal(-1, selectString("main", word, 1))
+          local format = getTextFormat("main")
+          moveCursorEnd("main")
+          assert.are.same({ 255, 0, 0 }, format.foreground)
+          assert.is_false(format.italic)
+          return
+        end
+      end
+      error(needle .. " is not on any of the last lines")
+    end
+
+    it("should draw a link in its selected style alone", function()
+      assert.is_true(feedTriggers("SELWHOLE1 " .. italic .. selectedLink .. "picked" .. closeLink .. " SELWHOLE1\n"))
+      assertSelectedStyle("SELWHOLE1", "picked")
+    end)
+
+    it("should draw the part of a link a flush marker committed early in its selected style", function()
+      assert.is_true(feedTriggers("SELFLUSH1 " .. italic .. selectedLink .. "early\r"))
+      assert.is_true(feedTriggers("late" .. closeLink .. " SELFLUSH2\n"))
+      assertSelectedStyle("SELFLUSH1", "early")
+      assertSelectedStyle("SELFLUSH2", "late")
+    end)
+
+    it("should draw the early part in its selected style when a line above it is deleted", function()
+      assert.is_true(feedTriggers("SELDELETE0 a line to delete\n"))
+      assert.is_true(feedTriggers("SELDELETE1 " .. italic .. selectedLink .. "early\r"))
+      local lastLine = getLastLineNumber("main")
+      local doomed
+      for lineNumber = lastLine, math.max(0, lastLine - 3), -1 do
+        if getLines("main", lineNumber, lineNumber + 1)[1]:find("SELDELETE0", 1, true) then
+          doomed = lineNumber
+          break
+        end
+      end
+      assert.is_not_nil(doomed)
+      moveCursor("main", 0, doomed)
+      deleteLine("main")
+      moveCursorEnd("main")
+      assert.is_nil(findRecentLine("SELDELETE0"))
+      assert.is_true(feedTriggers("late" .. closeLink .. " SELDELETE2\n"))
+      assertSelectedStyle("SELDELETE1", "early")
+      assertSelectedStyle("SELDELETE2", "late")
+    end)
+
+    it("should draw the early part in its selected style when the scrollback is trimmed in between", function()
+      local lines, batch = getConsoleBufferSize("main")
+      local trimmedLimit, trimmedBatch = 100, 10
+      setConsoleBufferSize("main", trimmedLimit, trimmedBatch)
+      finally(function()
+        setConsoleBufferSize("main", lines, batch)
+      end)
+      -- the buffer drops a batch of lines whenever it outgrows its limit, so
+      -- once it has, it does so again exactly a batch of lines later
+      local before = getLineCount("main")
+      for _ = 1, 10 * trimmedLimit do
+        feedTriggers("SELTRIM filler\n")
+        local now = getLineCount("main")
+        if now < before then
+          break
+        end
+        before = now
+      end
+      for _ = 1, trimmedBatch - 1 do
+        feedTriggers("SELTRIM filler\n")
+      end
+      before = getLineCount("main")
+      assert.is_true(feedTriggers("SELTRIM1 " .. italic .. selectedLink .. "early\r"))
+      assert.is_true(getLineCount("main") < before)
+      assert.is_true(feedTriggers("late" .. closeLink .. " SELTRIM2\n"))
+      assertSelectedStyle("SELTRIM1", "early")
+      assertSelectedStyle("SELTRIM2", "late")
     end)
   end)
 
