@@ -1,4 +1,13 @@
 describe("Tests DebugTools.lua functions", function()
+  describe("Tests the functionality of prettywrite", function()
+    it("Should still format the way inspect does", function()
+      -- prettywrite is the old name for inspect, kept for old scripts; nothing
+      -- inside Mudlet calls it, so nothing else would notice it drifting
+      assert.equals(inspect({1, 2}), prettywrite({1, 2}))
+      assert.equals(inspect({a = {b = 1}}), prettywrite({a = {b = 1}}))
+    end)
+  end)
+
   describe("Tests the functionality of printDebug", function()
     local s
     before_each(function()
@@ -13,7 +22,41 @@ describe("Tests DebugTools.lua functions", function()
     it("should pass a message on to debugc", function()
       printDebug("This is a test")
       assert.spy(s).was_called(1)
-      assert.spy(s).was_called_with(match.has_match("%(.+[\\/]busted[\\/]core.lua:line %d+%) This is a test"))
+      assert.spy(s).was_called_with(match.has_match("%(.+DebugTools_spec.lua:line %d+%) This is a test"))
+    end)
+
+    it("should name the line that called it, not the bottom of the call stack", function()
+      local line
+      local function helper()
+        line = debug.getinfo(1, "l").currentline + 1
+        printDebug("This is a test")
+      end
+      helper()
+      assert.spy(s).was_called_with(match.has_match("DebugTools_spec.lua:line " .. line .. "%) This is a test"))
+    end)
+
+    it("should name the line that called it through pcall", function()
+      local line = debug.getinfo(1, "l").currentline + 1
+      pcall(printDebug, "This is a test")
+      assert.spy(s).was_called_with(match.has_match("DebugTools_spec.lua:line " .. line .. "%) This is a test"))
+    end)
+
+    it("should still print when it is tail called with nothing beneath it", function()
+      -- a trigger or alias is called straight from C++, as a coroutine's body is
+      local ok, err = coroutine.resume(coroutine.create(function()
+        return printDebug("This is a test")
+      end))
+      assert.is_true(ok, err)
+      assert.spy(s).was_called_with(match.has_match("This is a test"))
+    end)
+
+    it("should name a real line when it is tail called", function()
+      local function helper()
+        return printDebug("This is a test")
+      end
+      local line = debug.getinfo(1, "l").currentline + 1
+      helper()
+      assert.spy(s).was_called_with(match.has_match("DebugTools_spec.lua:line " .. line .. "%) This is a test"))
     end)
 
     it("should include a stacktrace when called with stackTrace true", function()
@@ -43,13 +86,47 @@ describe("Tests DebugTools.lua functions", function()
     it("should pass msg on to error with additional information", function()
       printError("This is a test")
       assert.spy(s).was_called(1)
-      assert.spy(s).was_called_with(match.has_match("This is a test"), match.has_match("%(.+[\\/]busted[\\/]core.lua:line %d+%)"))
+      assert.spy(s).was_called_with(match.has_match("This is a test"), match.has_match("%(.+DebugTools_spec.lua:line %d+%)"))
+    end)
+
+    it("should name the line that called it, not the bottom of the call stack", function()
+      local line
+      local function helper()
+        line = debug.getinfo(1, "l").currentline + 1
+        printError("This is a test")
+      end
+      helper()
+      assert.spy(s).was_called_with(match.has_match("This is a test"), match.has_match("DebugTools_spec.lua:line " .. line .. "%)$"))
+    end)
+
+    it("should name the script's line, not Mudlet's own, when Mudlet's Lua reports a mistake", function()
+      local label = "debugToolsSpecTakenName"
+      finally(function()
+        deleteLabel(label)
+      end)
+      assert.is_true(createLabel(label, 0, 0, 10, 10, 1))
+      local line = debug.getinfo(1, "l").currentline + 1
+      assert.is_nil(Geyser.MiniConsole:new({name = label}))
+      assert.spy(s).was_called_with(match.has_match("was not created"), match.has_match("DebugTools_spec.lua:line " .. line .. "%)$"))
+    end)
+
+    it("should name Mudlet's line when a script tail calls into Mudlet's Lua with nothing beneath it", function()
+      local label = "debugToolsSpecTakenName"
+      finally(function()
+        deleteLabel(label)
+      end)
+      assert.is_true(createLabel(label, 0, 0, 10, 10, 1))
+      local ok, err = coroutine.resume(coroutine.create(function()
+        return Geyser.MiniConsole:new({name = label})
+      end))
+      assert.is_true(ok, err)
+      assert.spy(s).was_called_with(match.has_match("was not created"), match.has_match("GeyserMiniConsole%.lua:line %d+%)$"))
     end)
 
     it("should include a stacktrace when called with stackTrace true", function()
       printError("This is a test", true)
       assert.spy(s).was_called(1)
-      assert.spy(s).was_called_with(match.has_match("\nstack traceback:\n"), match.has_match("%(.+[\\/]busted[\\/]core.lua:line %d+%)"))
+      assert.spy(s).was_called_with(match.has_match("\nstack traceback:\n"), match.has_match("%(.+DebugTools_spec.lua:line %d+%)"))
     end)
 
     it("should NOT include a stacktrace when called without stackTrace true", function()
@@ -128,6 +205,25 @@ describe("Tests DebugTools.lua functions", function()
       assert.is_truthy(after)
       assert.is_true(before < nilAt and nilAt < after, "the nil should keep its place between the two strings")
     end)
+
+    it("Should show a nil given as its last argument", function()
+      display("before", nil)
+      local text = mainConsoleText()
+      local before = text:find('"before"', 1, true)
+      assert.is_truthy(before)
+      assert.is_truthy(text:find("nil", before, true), "the trailing nil should be shown after the string")
+    end)
+
+    it("Should show every nil when given only nils", function()
+      display(nil, nil)
+      local _, count = mainConsoleText():gsub("nil", "")
+      assert.equals(2, count)
+    end)
+
+    it("Should return nothing, so its result cannot be echoed by accident", function()
+      assert.equals(0, select("#", display("hello")))
+      assert.equals(0, select("#", display("one", "two")))
+    end)
   end)
 
   describe("Tests the functionality of showMultimatches", function()
@@ -189,6 +285,78 @@ describe("Tests DebugTools.lua functions", function()
       -- the colours it picks are random, so the assertion is that the capture
       -- group no longer wears the colour the rest of the line does
       assert.are_not.same(defaultFormat, groupFormat)
+    end)
+
+    it("Should recolour named capture groups without raising an error", function()
+      local ok, err, selectSpy, groupFormat, defaultFormat
+      local id = tempRegexTrigger("^You wave (?<what>goodbye) to (?<who>everyone)\\.$", function()
+        selectString("You wave", 1)
+        defaultFormat = getTextFormat().foreground
+        selectSpy = spy.on(_G, "selectCaptureGroup")
+        ok, err = pcall(showCaptureGroups)
+        selectCaptureGroup:revert()
+        selectString("everyone", 1)
+        groupFormat = getTextFormat().foreground
+      end)
+      feedTriggers("You wave goodbye to everyone.\n")
+      killTrigger(id)
+
+      assert.is_true(ok, err)
+      -- each named group is visited once, by its number, and never by its name
+      assert.spy(selectSpy).was.called(3)
+      assert.spy(selectSpy).was_not.called_with("what")
+      assert.spy(selectSpy).was_not.called_with("who")
+      assert.are_not.same(defaultFormat, groupFormat)
+    end)
+
+    it("Should visit every group by number when named and unnamed groups mix", function()
+      local ok, err, selectSpy
+      local id = tempRegexTrigger("^(\\w+) (?<who>\\w+)$", function()
+        selectSpy = spy.on(_G, "selectCaptureGroup")
+        ok, err = pcall(showCaptureGroups)
+        selectCaptureGroup:revert()
+      end)
+      feedTriggers("alpha beta\n")
+      killTrigger(id)
+
+      assert.is_true(ok, err)
+      assert.spy(selectSpy).was.called(3)
+      assert.spy(selectSpy).was.called_with(1)
+      assert.spy(selectSpy).was.called_with(2)
+      assert.spy(selectSpy).was.called_with(3)
+      assert.spy(selectSpy).was_not.called_with("who")
+    end)
+
+    it("Should not recolour the previous group in place of one that captured nothing", function()
+      local ok, err, fgSpy
+      local id = tempRegexTrigger("^(\\w+) ?(\\d*)$", function()
+        fgSpy = spy.on(_G, "setFgColor")
+        ok, err = pcall(showCaptureGroups)
+        setFgColor:revert()
+      end)
+      feedTriggers("alpha\n")
+      killTrigger(id)
+
+      assert.is_true(ok, err)
+      -- the whole match and the word; the empty number group has nothing to colour
+      assert.spy(fgSpy).was.called(2)
+    end)
+
+    it("Should not recolour the previous group in place of one that no longer fits the line", function()
+      local ok, err, fgSpy
+      local id = tempRegexTrigger("^(\\w+) (\\w+ \\w+)$", function()
+        selectString("cc", 1)
+        replace("")
+        fgSpy = spy.on(_G, "setFgColor")
+        ok, err = pcall(showCaptureGroups)
+        setFgColor:revert()
+      end)
+      feedTriggers("aa bb cc\n")
+      killTrigger(id)
+
+      assert.is_true(ok, err)
+      -- only "aa" still fits the shortened line "aa bb "
+      assert.spy(fgSpy).was.called(1)
     end)
   end)
 end)

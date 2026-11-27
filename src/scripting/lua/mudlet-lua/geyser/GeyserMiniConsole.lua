@@ -57,13 +57,20 @@ function Geyser.MiniConsole:setBufferSize (linesLimit, sizeOfBatchDeletion)
 end
 
 --- Sets the new font to use - use a monospaced font, non-monospaced fonts aren't supported by Mudlet
--- and won't give the best results.
+-- and won't give the best results. Returns true if the font changed, nil+error if not.
 -- @param font Font family name to use (see https://doc.qt.io/qt-5/qfont.html#setFamily for details)
 function Geyser.MiniConsole:setFont (font)
-  if font then
-    self.font = font
+  -- only remember a family the miniconsole really took: setFont() refuses one
+  -- that is not installed, which Qt would otherwise silently substitute
+  local ok, err = setFont(self.name, font)
+  if not ok then
+    return nil, err
   end
-  setFont(self.name, font)
+  self.font = font
+  if self.autoWrap then
+    self:resetAutoWrap()
+  end
+  return true
 end
 
 --- Returns the font family in use by this miniconsole.
@@ -108,8 +115,12 @@ function Geyser.MiniConsole:setTextFormat(r1, g1, b1, r2, g2, b2, bold, underlin
   setTextFormat(self.name, r1, g1, b1, r2, g2, b2, bold, underline, italics)
 end
 
-function Geyser.MiniConsole:calcFontSize()
-  return calcFontSize(self.name)
+--- Returns the width and height of a character in this miniconsole's font, in pixels.
+-- @param averageWidth Optional. True to have the width be the one the miniconsole
+-- draws each column in, the font's average character width in whole pixels, rather
+-- than the width of a "W". Only the former fits its columns on a proportional font.
+function Geyser.MiniConsole:calcFontSize(averageWidth)
+  return calcFontSize(self.name, averageWidth == true)
 end
 
 --- Enables the scroll bar for this window
@@ -431,7 +442,7 @@ function Geyser.MiniConsole:resetAutoWrap()
     return nil, "Autowrap is not enabled for " .. self.name
   end
 
-  local fontWidth, fontHeight = calcFontSize(self.name)
+  local fontWidth, fontHeight = calcFontSize(self.name, true)
   local consoleWidth = self.get_width()
 
   if self.scrollBar then
@@ -448,7 +459,8 @@ end
 --- The same as Mudlet's base display(), but outputs to the miniconsole instead of the main window.
 function Geyser.MiniConsole:display(...)
   local arg = {...}
-  arg.n = table.maxn(arg)
+  -- table.maxn() cannot see a nil at the end, so display(value, nil) would show only the value
+  arg.n = select("#", ...)
   if arg.n > 1 then
     for i = 1, arg.n do
       self:display(arg[i])
@@ -595,6 +607,12 @@ function Geyser.MiniConsole:new (cons, container)
   -- Initiate and set gauge specific things
   cons = cons or {}
   cons.type = cons.type or "miniConsole"
+  -- Geyser.UserWindow's class is made from this while the Lua library loads, before GUIUtils.lua is in
+  local taken = mudlet.nameTakenByOtherKind and mudlet.nameTakenByOtherKind(cons.name, "miniconsole", cons.windowname or (container or Geyser).windowname)
+  if taken then
+    printError(string.format("Geyser.MiniConsole '%s' was not created: %s", cons.name, taken), false, false)
+    return nil, taken
+  end
 
   -- Call parent's constructor
   local me = self.parent:new(cons, container)
@@ -606,8 +624,10 @@ function Geyser.MiniConsole:new (cons, container)
   -- Now create the MiniConsole using primitives
   if not string.find(me.name, ".+Class$") then
     me.windowname = me.windowname or me.container.windowname or "main"
-    createMiniConsole(me.windowname,me.name, me:get_x(), me:get_y(),
-    me:get_width(), me:get_height())
+    local ok, err = createMiniConsole(me.windowname,me.name, me:pixel_geometry())
+    if not mudlet.elementCreated(me.windowname, me.name, ok, err, "miniconsole") then
+      printError(string.format("Geyser.MiniConsole '%s' was not created: %s", me.name, err or "unknown error"), false, false)
+    end
 
 -- Geyser.Container:new() settles the hidden constraint before there is a widget to hide, so the hide is made good here
     if me.hidden or me.auto_hidden then
@@ -674,6 +694,5 @@ end
 function Geyser.MiniConsole:new2 (cons, container)
   cons = cons or {}
   cons.useAdd2 = true
-  local me = self:new(cons, container)
-  return me
+  return self:new(cons, container)
 end
